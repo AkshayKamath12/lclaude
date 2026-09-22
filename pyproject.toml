@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lclaude"
+version = "0.1.0"
+description = "Cross-platform CLI execution harness for local LLMs via Ollama"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+lclaude = "lclaude.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lclaude"]
+
+# Code style & linting configuration
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "A"]
+ignore = ["B008"]
+
+# Static type checking
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true

@@ -1,0 +1,19 @@
+# Byte-compiled / optimized files
+__pycache__/
+*.py[cod]
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Environments
+.venv/
+env/
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# Runtime data (your local tests)
+.local_claude/
