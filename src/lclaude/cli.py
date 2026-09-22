@@ -32,7 +32,7 @@ def handle_slash_command(cmd: str, history: list[dict[str, Any]]) -> bool:
             "  /clear    Clear conversation context history\n"
             "  /history  Display active turn count and roles\n"
             "  /help     Show this help message\n"
-            "  /exit     Terminate the program (or /quit)\n"
+            "  /exit     Terminate the program\n"
         )
         return True
 

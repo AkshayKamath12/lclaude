@@ -1,7 +1,6 @@
 """Unit tests for the CLI presentation layer and REPL loop."""
 
 import io
-import sys
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -10,7 +9,6 @@ from lclaude.engine import (
     InferenceEngine,
     ModelNotFoundError,
     OllamaConnectionError,
-    OllamaEngineError,
 )
 
 
