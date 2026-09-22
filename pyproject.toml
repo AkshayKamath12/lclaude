@@ -7,7 +7,17 @@ name = "lclaude"
 version = "0.1.0"
 description = "Cross-platform CLI execution harness for local LLMs via Ollama"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "ollama>=0.3.0",
+    "httpx>=0.27.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "mypy>=1.10.0",
+    "ruff>=0.5.0",
+]
 
 [project.scripts]
 lclaude = "lclaude.cli:main"
