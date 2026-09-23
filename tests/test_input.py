@@ -395,7 +395,8 @@ def test_completion_opens_filters_and_displays_registry_descriptions():
                 assert editor.buffer.complete_state is None
                 await editor.send("\x08")
                 assert editor.buffer.complete_state is not None
-                assert await editor.finish() == "/H"
+                assert editor.buffer.text == "/H"
+                assert await editor.finish() == "/history"
     asyncio.run(scenario())
 
 
@@ -407,7 +408,7 @@ def test_completion_menu_anchor_and_selection_rendering():
                 positions = []
                 for keys in ["/", "h", "e", "\x08"]:
                     await editor.send(keys)
-                    assert editor.buffer.complete_state.complete_index is None
+                    assert editor.buffer.complete_state.complete_index == 0
                     with set_app(editor.prompt.app):
                         content = editor.prompt.layout.current_control.create_content(80, 24)
                         positions.append(content.menu_position)
@@ -418,8 +419,8 @@ def test_completion_menu_anchor_and_selection_rendering():
                                     style
                                 )
                                 assert attrs.bgcolor == "default"
-                                assert not attrs.reverse
-                                assert not attrs.bold
+                                assert attrs.reverse == (row == 0)
+                                assert attrs.bold == (row == 0)
                 assert positions[0] is not None
                 assert all(position == positions[0] for position in positions)
                 await editor.send(DOWN)
@@ -427,11 +428,11 @@ def test_completion_menu_anchor_and_selection_rendering():
                     content = editor.prompt.layout.current_control.create_content(80, 24)
                     assert content.menu_position == positions[0]
                     menu = CompletionsMenuControl().create_content(80, 24)
-                    for style, _ in menu.get_line(0):
+                    for style, _ in menu.get_line(1):
                         attrs = editor.prompt.app._merged_style.get_attrs_for_style_str(style)
                         assert attrs.reverse
                         assert attrs.bold
-                assert await editor.finish() == "/history"
+                assert await editor.finish() == "/help"
     asyncio.run(scenario())
 
 
@@ -453,18 +454,34 @@ def test_new_registry_command_completes_without_executing(monkeypatch):
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("selection", ["\t", DOWN, DOWN + DOWN + UP])
-def test_completion_selection_and_enter_submission(selection):
+@pytest.mark.parametrize("selection, expected", [
+    ("\t", "/history"), (DOWN, "/help"), (DOWN + UP, "/history"),
+])
+def test_completion_selection_and_enter_submission(selection, expected):
     async def scenario():
         with create_pipe_input() as pipe:
             editor = Editor(pipe)
             async with editor.running():
                 await editor.send("/h")
-                expected = next(name for name in COMMANDS if name.startswith("/h"))
                 await editor.send(selection)
                 assert editor.buffer.text == expected
                 assert not editor.task.done()
                 assert await editor.finish() == expected
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("keys, expected", [
+    ("/he\r", "/help"), ("/he\n", "/help"), ("/h\r", "/history"),
+    ("/unknown\r", "/unknown"), (paste("/he") + "\r", "/he"),
+    ("/he" + NEWLINE + "text\r", "/he\ntext"),
+])
+def test_enter_completes_prefix_even_when_typed_without_a_pause(keys, expected):
+    async def scenario():
+        with create_pipe_input() as pipe:
+            editor = Editor(pipe)
+            async with editor.running():
+                assert await editor.finish(keys) == expected
+            assert editor.prompt.history.get_strings() == [expected]
     asyncio.run(scenario())
 
 

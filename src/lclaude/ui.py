@@ -5,6 +5,7 @@ import sys
 from collections.abc import Iterable, Mapping
 
 from prompt_toolkit import PromptSession
+from prompt_toolkit.buffer import Buffer, CompletionState
 from prompt_toolkit.completion import CompleteEvent, Completer, Completion, ConditionalCompleter
 from prompt_toolkit.document import Document
 from prompt_toolkit.filters import Condition, has_completions
@@ -87,6 +88,25 @@ class InputReader:
         if interactive:
             bindings = KeyBindings()
 
+            def refresh_completions(buffer: Buffer) -> None:
+                # Registry lookup is immediate. Highlight without replacing the
+                # typed prefix, so further typing continues to filter normally.
+                completions = list(buffer.completer.get_completions(
+                    buffer.document, CompleteEvent(text_inserted=True)
+                )) if buffer.completer else []
+                buffer.complete_state = (
+                    CompletionState(buffer.document, completions, complete_index=0)
+                    if completions else None
+                )
+
+            @bindings.add("tab", filter=has_completions)
+            def complete(event: KeyPressEvent) -> None:
+                buffer = event.current_buffer
+                state = buffer.complete_state
+                if state and state.current_completion:
+                    buffer.apply_completion(state.current_completion)
+                    buffer.complete_state = None
+
             @bindings.add("escape", filter=has_completions)
             def dismiss_completion(event: KeyPressEvent) -> None:
                 event.current_buffer.cancel_completion()
@@ -99,6 +119,7 @@ class InputReader:
 
             @bindings.add("enter")
             def accept(event: KeyPressEvent) -> None:
+                complete(event)
                 if self._has_nonblank_content(event.current_buffer.text):
                     event.current_buffer.validate_and_handle()
 
@@ -130,7 +151,7 @@ class InputReader:
                 if not buff.text:
                     self._completion_suppressed = False
                 if not self._completion_suppressed:
-                    buff.start_completion(select_first=False)
+                    refresh_completions(buff)
 
             if sys.platform == "win32":
                 @bindings.add("c-z")
@@ -148,7 +169,7 @@ class InputReader:
                     SlashCommandCompleter(commands or {}),
                     Condition(lambda: not self._completion_suppressed),
                 ),
-                complete_while_typing=True,
+                complete_while_typing=False,
                 style=Style.from_dict({
                     "completion-menu": "bg:default fg:default",
                     "completion-menu.completion": "bg:default fg:default",
@@ -164,6 +185,7 @@ class InputReader:
                 input=input_stream,
                 output=output_stream,
             )
+            self._prompt.default_buffer.on_text_insert += refresh_completions
 
             # Anchor at the slash, not at the cursor that moves while filtering.
             for control in self._prompt.layout.find_all_controls():
