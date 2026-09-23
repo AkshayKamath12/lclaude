@@ -13,26 +13,23 @@ from lclaude.engine import (
 
 from lclaude.commands import handle_slash_command
 from lclaude.session import Session
+from lclaude import ui
 
 
 def run_chat_loop(engine: InferenceEngine) -> None:
     """Executes the interactive Read-Eval-Print Loop (REPL)."""
     session = Session()
 
-    sys.stdout.write("==================================================\n")
-    sys.stdout.write("  lclaude - Local Inference Terminal\n")
-    sys.stdout.write(f"  Model:   {engine.model}\n")
-    sys.stdout.write(f"  Host:    {engine.host}\n")
-    sys.stdout.write("  Commands: /clear, /history, /exit, /help\n")
-    sys.stdout.write("  Abort generation: Ctrl+C | Exit: Ctrl+C at prompt\n")
-    sys.stdout.write("==================================================\n")
+    ui.print_banner(engine.model, engine.host)
 
     while True:
-        try:
-            user_input = input("\n> ").strip()
-        except (KeyboardInterrupt, EOFError):
+        user_input = ui.get_user_input()
+
+        if user_input is None:
+            # Permanently ignore SIGINT here so a user pressing 
+            # Ctrl+C a second time doesn't trigger an unhandled traceback.
             signal.signal(signal.SIGINT, signal.SIG_IGN)
-            sys.stdout.write("\n\nSession terminated by user.\n")
+            ui.print_session_end()
             break
 
         if not user_input:
@@ -43,38 +40,18 @@ def run_chat_loop(engine: InferenceEngine) -> None:
             continue
 
         session.add_message('user', user_input)
-        sys.stdout.write("\nAssistant: ")
-        sys.stdout.flush()
 
-        accumulated_tokens: list[str] = []
-
-        # stream generation
         try:
-            for token in engine.stream_chat(session.messages):
-                sys.stdout.write(token)
-                sys.stdout.flush()
-                accumulated_tokens.append(token)
-
-            sys.stdout.write("\n")
-
-            # Finalize assistant response in history on clean completion
-            session.add_message('assistant', "".join(accumulated_tokens))
-
-        except KeyboardInterrupt:
-            # Traps Ctrl+C DURING active generation
-            sys.stdout.write("\n\n[Generation aborted by user]\n")
+            full_response = ui.render_stream(engine.stream_chat(session.messages))
+            session.add_message("assistant", full_response)
+        except ui.StreamAbortedError:
             session.rollback()
-
-        except OllamaConnectionError as exc:
-            sys.stderr.write(f"\n\n[Connection Error]: {exc}\n")
+            ui.print_aborted()
+        except (OllamaConnectionError, OllamaEngineError) as exc:
             session.rollback()
+            ui.print_error("Connection Error", str(exc))
 
-        except OllamaEngineError as exc:
-            sys.stderr.write(f"\n\n[Engine Error]: {exc}\n")
-            session.rollback()
-
-
-def main() -> None:
+def parse_args() -> argparse.Namespace:
     """Parses flags, verifies local engine readiness, and launches the REPL."""
     parser = argparse.ArgumentParser(
         prog='lclaude',
@@ -100,8 +77,12 @@ def main() -> None:
         default=60.0,
         help="Client socket timeout in seconds (default: 60.0)",
     )
+    return parser.parse_args()
 
-    args = parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
 
     engine = InferenceEngine(
         model=args.model,
