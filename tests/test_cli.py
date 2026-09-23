@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from lclaude.cli import handle_slash_command, main, run_chat_loop
+from lclaude.commands import COMMANDS
 from lclaude.engine import (
     InferenceEngine,
     ModelNotFoundError,
@@ -184,7 +185,9 @@ def test_multiline_and_padded_commands_never_reach_inference(command):
     ):
         reader_factory.return_value.read.side_effect = [" \n ", command, None]
         run_chat_loop(engine)
-        reader_factory.assert_called_once_with()
+        reader_factory.assert_called_once_with(
+            commands={name: info["desc"] for name, info in COMMANDS.items()}
+        )
         engine.stream_chat.assert_not_called()
         assert session.messages == []
         if command == "/help\n/exit":
@@ -218,7 +221,9 @@ def test_multiline_failed_turn_rolls_back_and_next_turn_succeeds(failure):
     ):
         reader_factory.return_value.read.side_effect = [failed_prompt, next_prompt, None]
         run_chat_loop(engine)
-        reader_factory.assert_called_once_with()
+        reader_factory.assert_called_once_with(
+            commands={name: info["desc"] for name, info in COMMANDS.items()}
+        )
     assert engine.stream_chat.call_args_list[0].args[0] == baseline + [
         {"role": "user", "content": failed_prompt}
     ]
@@ -242,7 +247,9 @@ def test_clear_reuses_input_reader_but_clears_conversation():
     ):
         reader_factory.return_value.read.side_effect = ["first", "/clear", "second", None]
         run_chat_loop(engine)
-        reader_factory.assert_called_once_with()
+        reader_factory.assert_called_once_with(
+            commands={name: info["desc"] for name, info in COMMANDS.items()}
+        )
     assert engine.stream_chat.call_args_list[1].args[0] == [
         {"role": "user", "content": "second"}
     ]
