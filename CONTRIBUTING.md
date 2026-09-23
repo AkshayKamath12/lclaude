@@ -68,5 +68,22 @@ Example requests:
 - `Use $raise-pr to open a PR for the completed work on issue #8.`
 - `Use $raise-pr to update this branch's PR and check its CI status.`
 
-These files define conventions; GitHub Actions and repository rules must be
-configured separately to enforce checks and merge requirements.
+## Continuous integration
+
+GitHub Actions runs `Unit tests`, `Lint`, and `Type checking` on every PR targeting
+`main` (including drafts) and on pushes to `main`. Each check installs `.[dev]`
+from `pyproject.toml` and uses its existing pytest, Ruff, and mypy configuration.
+CI uses Python 3.10, the minimum supported version; update it when that minimum
+changes. Unit tests mock Ollama and need no model download or running server.
+
+To run the same checks locally after `python -m pip install '.[dev]'`:
+
+```sh
+python -m pytest
+python -m ruff check .
+python -m mypy src
+```
+
+Require all three check names in the `main` branch ruleset to block failing PRs.
+The workflow supplies check results; the ruleset enforces them. This initial CI
+does not publish packages or test a matrix of operating systems and Python versions.

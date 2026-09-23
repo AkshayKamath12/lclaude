@@ -1,7 +1,8 @@
 """Session management for lclaude"""
 
-from dataclasses import dataclass, field
-from typing import Any, Literal
+from dataclasses import dataclass
+from typing import Literal
+
 
 @dataclass
 class Message:
@@ -37,7 +38,7 @@ class Session:
         """Returns the number of completed user-assistant round trips."""
         return len(self._messages) // 2
 
-    def add_message(self, role: Literal["assistant", "user"], content: str):
+    def add_message(self, role: Literal["assistant", "user"], content: str) -> None:
         self._messages.append(Message(role, content=content))
 
     def rollback(self) -> bool:
@@ -52,7 +53,7 @@ class Session:
 
     def get_preview(self, max_chars: int = 60) -> list[tuple[int, str, str]]:
         """Returns (index, role, truncated_content) for history inspection."""
-        previews = []
+        previews: list[tuple[int, str, str]] = []
         for idx, msg in enumerate(self._messages, 1):
             clean_content = msg.content.replace("\n", " ").strip()
             snippet = (

@@ -4,8 +4,9 @@ Usage:
     python -m scripts.check_engine
 """
 
-import time
 import sys
+import time
+
 from lclaude.engine import (
     InferenceEngine,
     ModelNotFoundError,
@@ -58,10 +59,10 @@ def run_diagnostics(model: str = "qwen2.5:7b-instruct") -> None:
         ttft = (first_token_time - start_time) if first_token_time else 0.0
 
         print("\n---")
-        print(f"Metrics:")
+        print("Metrics:")
         print(f"  - Time to First Token (TTFT): {ttft:.2f}s")
         print(f"  - Total Generation Time:     {total_time:.2f}s")
-        print(f"  - Status: OK\n")
+        print("  - Status: OK\n")
 
     except Exception as exc:
         print(f"\n[Stream Failed]: {exc}")

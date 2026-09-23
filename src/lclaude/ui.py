@@ -1,8 +1,7 @@
 """Terminal presentation and I/O handling for lclaude."""
 
-from collections.abc import Iterable
 import sys
-import signal
+from collections.abc import Iterable
 
 
 class StreamAbortedError(Exception):
@@ -49,7 +48,7 @@ def render_stream(token_stream: Iterable[str]) -> str:
     except KeyboardInterrupt:
         sys.stdout.write("\n")
         sys.stdout.flush()
-        raise StreamAbortedError()
+        raise StreamAbortedError() from None
 
     sys.stdout.write("\n")
     sys.stdout.flush()

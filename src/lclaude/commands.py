@@ -1,9 +1,11 @@
 """Slash command handler for lclaude."""
 
 import sys
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import TypedDict
 
 from lclaude.session import Session
+
 
 def _handle_clear(session: Session) -> bool:
     session.clear()
@@ -32,7 +34,12 @@ def _handle_exit(session: Session) -> bool:
     sys.stdout.write("\nExiting session.\n")
     sys.exit(0)
 
-COMMANDS: dict[str, dict[str, Any]] = {
+class Command(TypedDict):
+    desc: str
+    handler: Callable[[Session], bool]
+
+
+COMMANDS: dict[str, Command] = {
     "/clear": {
         "desc": "Clear conversation context history",
         "handler": _handle_clear,

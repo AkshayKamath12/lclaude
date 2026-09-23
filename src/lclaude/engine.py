@@ -3,8 +3,10 @@
 from collections.abc import Generator
 from contextlib import contextmanager
 from typing import Any
+
 import httpx
 import ollama
+
 
 class OllamaEngineError(Exception):
     """Base exception for all failures originating within inference engine"""
@@ -69,7 +71,11 @@ class InferenceEngine:
                     model_names.append(model_name)
 
             for model_name in model_names:
-                if model_name == self.model or model_name == f"{self.model}:latest" or self.model == f"{model_name}:latest":
+                if (
+                    model_name == self.model
+                    or model_name == f"{self.model}:latest"
+                    or self.model == f"{model_name}:latest"
+                ):
                     #found match, return early to avoid throwing error
                     return
                 
