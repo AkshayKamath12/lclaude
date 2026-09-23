@@ -5,7 +5,9 @@ from contextlib import asynccontextmanager, contextmanager
 from unittest.mock import Mock, patch
 
 import pytest
+from prompt_toolkit.application.current import set_app
 from prompt_toolkit.input import create_pipe_input
+from prompt_toolkit.layout.menus import CompletionsMenuControl
 from prompt_toolkit.output import DummyOutput
 
 from lclaude.commands import COMMANDS
@@ -394,6 +396,42 @@ def test_completion_opens_filters_and_displays_registry_descriptions():
                 await editor.send("\x08")
                 assert editor.buffer.complete_state is not None
                 assert await editor.finish() == "/H"
+    asyncio.run(scenario())
+
+
+def test_completion_menu_anchor_and_selection_rendering():
+    async def scenario():
+        with create_pipe_input() as pipe:
+            editor = Editor(pipe)
+            async with editor.running():
+                positions = []
+                for keys in ["/", "h", "e", "\x08"]:
+                    await editor.send(keys)
+                    assert editor.buffer.complete_state.complete_index is None
+                    with set_app(editor.prompt.app):
+                        content = editor.prompt.layout.current_control.create_content(80, 24)
+                        positions.append(content.menu_position)
+                        menu = CompletionsMenuControl().create_content(80, 24)
+                        for row in range(menu.line_count):
+                            for style, _ in menu.get_line(row):
+                                attrs = editor.prompt.app._merged_style.get_attrs_for_style_str(
+                                    style
+                                )
+                                assert attrs.bgcolor == "default"
+                                assert not attrs.reverse
+                                assert not attrs.bold
+                assert positions[0] is not None
+                assert all(position == positions[0] for position in positions)
+                await editor.send(DOWN)
+                with set_app(editor.prompt.app):
+                    content = editor.prompt.layout.current_control.create_content(80, 24)
+                    assert content.menu_position == positions[0]
+                    menu = CompletionsMenuControl().create_content(80, 24)
+                    for style, _ in menu.get_line(0):
+                        attrs = editor.prompt.app._merged_style.get_attrs_for_style_str(style)
+                        assert attrs.reverse
+                        assert attrs.bold
+                assert await editor.finish() == "/history"
     asyncio.run(scenario())
 
 

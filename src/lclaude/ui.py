@@ -12,7 +12,9 @@ from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.input import Input
 from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
 from prompt_toolkit.keys import Keys
+from prompt_toolkit.layout.controls import BufferControl
 from prompt_toolkit.output import Output
+from prompt_toolkit.styles import Style
 from prompt_toolkit.validation import Validator
 from rich.console import Console
 from rich.live import Live
@@ -147,6 +149,13 @@ class InputReader:
                     Condition(lambda: not self._completion_suppressed),
                 ),
                 complete_while_typing=True,
+                style=Style.from_dict({
+                    "completion-menu": "bg:default fg:default",
+                    "completion-menu.completion": "bg:default fg:default",
+                    "completion-menu.meta.completion": "bg:default fg:default",
+                    "completion-menu.completion.current": "bg:default fg:default reverse bold",
+                    "completion-menu.meta.completion.current": "bg:default fg:default reverse bold",
+                }),
                 key_bindings=bindings,
                 validator=Validator.from_callable(
                     self._has_nonblank_content
@@ -155,6 +164,14 @@ class InputReader:
                 input=input_stream,
                 output=output_stream,
             )
+
+            # Anchor at the slash, not at the cursor that moves while filtering.
+            for control in self._prompt.layout.find_all_controls():
+                if (
+                    isinstance(control, BufferControl)
+                    and control.buffer is self._prompt.default_buffer
+                ):
+                    control.menu_position = lambda: 0
 
             # Normalize paste newlines and display large pastes as compact markers.
             original_insert_text = self._prompt.default_buffer.insert_text
