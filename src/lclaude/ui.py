@@ -129,7 +129,7 @@ class InputReader:
                 else:
                     original_insert_text(data, overwrite, move_cursor, fire_event)
 
-            self._prompt.default_buffer.insert_text = custom_insert_text
+            self._prompt.default_buffer.insert_text = custom_insert_text  # type: ignore[method-assign]
 
     def _has_nonblank_content(self, text: str) -> bool:
         for placeholder, actual in self._pasted_blocks:
