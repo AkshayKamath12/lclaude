@@ -1,12 +1,16 @@
-import ollama
 import time
+
+import ollama
 
 print("Sending request to qwen2.5:7b-instruct...")
 start_time = time.time()
 
 response = ollama.chat(
     model='qwen2.5:7b-instruct',
-    messages=[{'role': 'user', 'content': 'Write a 3 line python script to reverse a string. No explanation, just code.'}]
+    messages=[{
+        'role': 'user',
+        'content': 'Write a 3 line python script to reverse a string. No explanation, just code.',
+    }]
 )
 
 end_time = time.time()

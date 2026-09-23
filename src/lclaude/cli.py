@@ -1,19 +1,18 @@
 """Command Line Interface (REPL) for lclaude."""
 
 import argparse
-import sys
 import signal
+import sys
 
+from lclaude import ui
+from lclaude.commands import handle_slash_command
 from lclaude.engine import (
     InferenceEngine,
-    OllamaEngineError,
     ModelNotFoundError,
-    OllamaConnectionError
+    OllamaConnectionError,
+    OllamaEngineError,
 )
-
-from lclaude.commands import handle_slash_command
 from lclaude.session import Session
-from lclaude import ui
 
 
 def run_chat_loop(engine: InferenceEngine) -> None:
