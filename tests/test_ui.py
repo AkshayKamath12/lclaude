@@ -5,8 +5,8 @@ import unittest
 from unittest.mock import patch
 
 from lclaude.ui import (
+    InputReader,
     StreamAbortedError,
-    get_user_input,
     print_aborted,
     print_banner,
     print_error,
@@ -17,27 +17,32 @@ from lclaude.ui import (
 
 
 class TestGetUserInput(unittest.TestCase):
-    """Verifies user input prompt handling and termination traps."""
+    """Verifies the non-TTY input path and termination traps."""
+
+    def setUp(self) -> None:
+        tty = patch("sys.stdin.isatty", return_value=False)
+        tty.start()
+        self.addCleanup(tty.stop)
 
     @patch("builtins.input", return_value="hello world")
     def test_get_user_input_success(self, mock_input) -> None:
-        result = get_user_input()
+        result = InputReader().read()
         self.assertEqual(result, "hello world")
         mock_input.assert_called_once_with("\n> ")
 
     @patch("builtins.input", return_value="   padded prompt text   \n")
     def test_get_user_input_strips_whitespace(self, mock_input) -> None:
-        result = get_user_input()
+        result = InputReader().read()
         self.assertEqual(result, "padded prompt text")
 
     @patch("builtins.input", side_effect=KeyboardInterrupt)
     def test_get_user_input_keyboard_interrupt_returns_none(self, mock_input) -> None:
-        result = get_user_input()
+        result = InputReader().read()
         self.assertIsNone(result)
 
     @patch("builtins.input", side_effect=EOFError)
     def test_get_user_input_eof_returns_none(self, mock_input) -> None:
-        result = get_user_input()
+        result = InputReader().read()
         self.assertIsNone(result)
 
 

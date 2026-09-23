@@ -20,9 +20,10 @@ def run_chat_loop(engine: InferenceEngine) -> None:
     session = Session()
 
     ui.print_banner(engine.model, engine.host)
+    reader = ui.InputReader()
 
     while True:
-        user_input = ui.get_user_input()
+        user_input = reader.read()
 
         if user_input is None:
             # Permanently ignore SIGINT here so a user pressing 
@@ -31,10 +32,10 @@ def run_chat_loop(engine: InferenceEngine) -> None:
             ui.print_session_end()
             break
 
-        if not user_input:
+        if not user_input.strip():
             continue
 
-        if user_input.startswith("/"):
+        if user_input.lstrip().startswith("/"):
             handle_slash_command(user_input, session)
             continue
 
