@@ -2,12 +2,16 @@
 
 import re
 import sys
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 
 from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import CompleteEvent, Completer, Completion, ConditionalCompleter
+from prompt_toolkit.document import Document
+from prompt_toolkit.filters import Condition, has_completions
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.input import Input
 from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
+from prompt_toolkit.keys import Keys
 from prompt_toolkit.output import Output
 from prompt_toolkit.validation import Validator
 from rich.console import Console
@@ -17,6 +21,27 @@ from rich.markdown import Markdown
 
 class StreamAbortedError(Exception):
     """Raised when token streaming is interrupted by the user (Ctrl+C)."""
+
+
+class SlashCommandCompleter(Completer):
+    """Present injected command metadata without knowing how commands execute."""
+
+    def __init__(self, commands: Mapping[str, str]) -> None:
+        self.commands = commands
+
+    def get_completions(
+        self, document: Document, complete_event: CompleteEvent
+    ) -> Iterable[Completion]:
+        text = document.text
+        if (
+            not text.startswith("/")
+            or any(char.isspace() for char in text)
+            or document.cursor_position != len(text)
+        ):
+            return
+        for name, description in self.commands.items():
+            if name.startswith(text.lower()):
+                yield Completion(name, start_position=-len(text), display_meta=description)
 
 
 class _PromptHistory(InMemoryHistory):
@@ -32,12 +57,12 @@ class _PromptHistory(InMemoryHistory):
         super().append_string(string)
 
 
-def print_banner(model: str, host: str) -> None:
+def print_banner(model: str, host: str, commands: Iterable[str] = ()) -> None:
     sys.stdout.write("==================================================\n")
     sys.stdout.write("  lclaude - Local CLI Coding Assistant\n")
     sys.stdout.write(f"  Model:   {model}\n")
     sys.stdout.write(f"  Host:    {host}\n")
-    sys.stdout.write("  Commands: /clear, /history, /exit, /help\n")
+    sys.stdout.write(f"  Commands: {', '.join(commands)}\n")
     sys.stdout.write("  Submit: Enter | Newline: Alt+Enter or Escape then Enter\n")
     sys.stdout.write("  Abort generation: Ctrl+C | Exit: Ctrl+C at prompt\n")
     sys.stdout.write("==================================================\n")
@@ -47,16 +72,28 @@ class InputReader:
     """Own input editing and process-local recall history, separate from chat state."""
 
     def __init__(
-        self, *, input_stream: Input | None = None, output_stream: Output | None = None
+        self, *, commands: Mapping[str, str] | None = None,
+        input_stream: Input | None = None, output_stream: Output | None = None
     ) -> None:
         interactive = input_stream is not None or output_stream is not None or (
             sys.stdin.isatty() and sys.stdout.isatty()
         )
         self._prompt: PromptSession[str] | None = None
         self._pasted_blocks: list[tuple[str, str]] = []
+        self._completion_suppressed = False
 
         if interactive:
             bindings = KeyBindings()
+
+            @bindings.add("escape", filter=has_completions)
+            def dismiss_completion(event: KeyPressEvent) -> None:
+                event.current_buffer.cancel_completion()
+
+            @bindings.add(Keys.BracketedPaste)
+            def bracketed_paste(event: KeyPressEvent) -> None:
+                self._completion_suppressed = True
+                event.current_buffer.complete_state = None
+                event.current_buffer.insert_text(event.data)
 
             @bindings.add("enter")
             def accept(event: KeyPressEvent) -> None:
@@ -88,6 +125,10 @@ class InputReader:
                 else:
                     # Default behavior: delete 1 character
                     buff.delete_before_cursor(count=1)
+                if not buff.text:
+                    self._completion_suppressed = False
+                if not self._completion_suppressed:
+                    buff.start_completion(select_first=False)
 
             if sys.platform == "win32":
                 @bindings.add("c-z")
@@ -101,6 +142,11 @@ class InputReader:
                 prompt_continuation="... ",
                 history=_PromptHistory(self._pasted_blocks),
                 enable_history_search=False,
+                completer=ConditionalCompleter(
+                    SlashCommandCompleter(commands or {}),
+                    Condition(lambda: not self._completion_suppressed),
+                ),
+                complete_while_typing=True,
                 key_bindings=bindings,
                 validator=Validator.from_callable(
                     self._has_nonblank_content
@@ -146,6 +192,7 @@ class InputReader:
         """Return a complete prompt, or None after interruption/EOF and cleanup."""
         try:
             if self._prompt is not None:
+                self._completion_suppressed = False
                 user_text = self._prompt.prompt()
                 return self._restore_pasted_text(user_text)
 

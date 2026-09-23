@@ -2,12 +2,13 @@
 
 import asyncio
 from contextlib import asynccontextmanager, contextmanager
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 
+from lclaude.commands import COMMANDS
 from lclaude.ui import InputReader
 
 UP = "\x1b[A"
@@ -26,7 +27,10 @@ class Editor:
     def __init__(self, pipe):
         self.pipe = pipe
         self.output = DummyOutput()
-        self.reader = InputReader(input_stream=pipe, output_stream=self.output)
+        self.reader = InputReader(
+            commands={name: info["desc"] for name, info in COMMANDS.items()},
+            input_stream=pipe, output_stream=self.output,
+        )
         self.prompt = self.reader._prompt
         self.processed = asyncio.Event()
         self.prompt.key_bindings.add("f12")(lambda event: self.processed.set())
@@ -39,6 +43,11 @@ class Editor:
         self.processed.clear()
         self.pipe.send_text(text + "\x1b[24~")
         await asyncio.wait_for(self.processed.wait(), 3)
+        # Completion runs in a background task after key processing.
+        tasks = [task for task in self.prompt.app._background_tasks
+                 if "async_completer" in task.get_coro().__qualname__]
+        if tasks:
+            await asyncio.wait_for(asyncio.gather(*tasks), 3)
 
     async def finish(self, text="\r"):
         self.pipe.send_text(text)
@@ -364,3 +373,111 @@ def test_non_tty_uses_line_input_without_constructing_editor(stdin_tty, stdout_t
         reader = InputReader()
         assert [reader.read(), reader.read(), reader.read()] == ["first", "second", None]
         prompt.assert_not_called()
+
+
+def test_completion_opens_filters_and_displays_registry_descriptions():
+    async def scenario():
+        with create_pipe_input() as pipe:
+            editor = Editor(pipe)
+            async with editor.running():
+                await editor.send("/")
+                completions = editor.buffer.complete_state.completions
+                assert [(c.text, c.display_meta_text) for c in completions] == [
+                    (name, info["desc"]) for name, info in COMMANDS.items()
+                ]
+                await editor.send("H")
+                assert [c.text for c in editor.buffer.complete_state.completions] == [
+                    name for name in COMMANDS if name.startswith("/h")
+                ]
+                await editor.send("z")
+                assert editor.buffer.complete_state is None
+                await editor.send("\x08")
+                assert editor.buffer.complete_state is not None
+                assert await editor.finish() == "/H"
+    asyncio.run(scenario())
+
+
+def test_new_registry_command_completes_without_executing(monkeypatch):
+    handler = Mock()
+    monkeypatch.setitem(COMMANDS, "/custom", {"desc": "Custom description", "handler": handler})
+
+    async def scenario():
+        with create_pipe_input() as pipe:
+            editor = Editor(pipe)
+            async with editor.running():
+                await editor.send("/cu")
+                completion = editor.buffer.complete_state.completions[0]
+                assert completion.display_meta_text == "Custom description"
+                await editor.send("\t")
+                assert editor.buffer.text == "/custom"
+                assert await editor.finish() == "/custom"
+                handler.assert_not_called()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("selection", ["\t", DOWN, DOWN + DOWN + UP])
+def test_completion_selection_and_enter_submission(selection):
+    async def scenario():
+        with create_pipe_input() as pipe:
+            editor = Editor(pipe)
+            async with editor.running():
+                await editor.send("/h")
+                expected = next(name for name in COMMANDS if name.startswith("/h"))
+                await editor.send(selection)
+                assert editor.buffer.text == expected
+                assert not editor.task.done()
+                assert await editor.finish() == expected
+    asyncio.run(scenario())
+
+
+def test_completion_escape_dismisses_and_history_still_works():
+    async def scenario():
+        with create_pipe_input() as pipe:
+            editor = Editor(pipe)
+            async with editor.running():
+                assert await editor.finish("previous\r") == "previous"
+            async with editor.running():
+                await editor.send("/h")
+                await editor.send(DOWN + "\x1b")
+                assert editor.buffer.complete_state is None
+                assert editor.buffer.text == "/h"
+                await editor.send(UP)
+                assert editor.buffer.text == "previous"
+                await editor.send(DOWN)
+                assert await editor.finish() == "/h"
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("text", [
+    "ordinary prose", "hello /h", " /h", "/h argument", "/h" + NEWLINE + "x",
+    paste("/h"), paste("/h\ncode"), "/" + paste("h"),
+])
+def test_completion_stays_closed_for_prose_multiline_and_paste(text):
+    async def scenario():
+        with create_pipe_input() as pipe:
+            editor = Editor(pipe)
+            async with editor.running():
+                await editor.send(text)
+                assert editor.buffer.complete_state is None
+                await editor.send("\t")
+                assert editor.buffer.complete_state is None
+                assert not editor.task.done()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("ending", [NEWLINE, "\x03"])
+def test_open_completion_preserves_newline_and_interrupt(ending):
+    async def scenario():
+        with create_pipe_input() as pipe:
+            editor = Editor(pipe)
+            async with editor.running():
+                await editor.send("/h")
+                assert editor.buffer.complete_state is not None
+                if ending == NEWLINE:
+                    await editor.send(ending)
+                    assert editor.buffer.complete_state is None
+                    assert await editor.finish() == "/h\n"
+                else:
+                    assert isinstance(await editor.finish(ending), KeyboardInterrupt)
+                    assert editor.prompt.history.get_strings() == []
+    asyncio.run(scenario())

@@ -5,7 +5,7 @@ import signal
 import sys
 
 from lclaude import ui
-from lclaude.commands import handle_slash_command
+from lclaude.commands import COMMANDS, handle_slash_command
 from lclaude.engine import (
     InferenceEngine,
     ModelNotFoundError,
@@ -19,8 +19,9 @@ def run_chat_loop(engine: InferenceEngine) -> None:
     """Executes the interactive Read-Eval-Print Loop (REPL)."""
     session = Session()
 
-    ui.print_banner(engine.model, engine.host)
-    reader = ui.InputReader()
+    commands = {name: info["desc"] for name, info in COMMANDS.items()}
+    ui.print_banner(engine.model, engine.host, commands)
+    reader = ui.InputReader(commands=commands)
 
     while True:
         user_input = reader.read()
