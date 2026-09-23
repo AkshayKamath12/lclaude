@@ -3,7 +3,6 @@
 import argparse
 import sys
 import signal
-from typing import Any
 
 from lclaude.engine import (
     InferenceEngine,
@@ -12,7 +11,9 @@ from lclaude.engine import (
     OllamaConnectionError
 )
 
-def handle_slash_command(cmd: str, history: list[dict[str, Any]]) -> bool:
+from lclaude.session import Session
+
+def handle_slash_command(cmd: str, session: Session) -> bool:
     """Processes slash commands and returns whether slash command was processed"""
     command = cmd.strip().lower()
 
@@ -22,7 +23,7 @@ def handle_slash_command(cmd: str, history: list[dict[str, Any]]) -> bool:
         return True
 
     if command == "/clear":
-        history.clear()
+        session.clear()
         sys.stdout.write("\nCleared conversation history.")
         return True
 
@@ -37,13 +38,13 @@ def handle_slash_command(cmd: str, history: list[dict[str, Any]]) -> bool:
         return True
 
     if command == "/history":
-        if not history:
+        if not session.messages:
             sys.stdout.write("\n[History is currently empty.]\n")
         else:
-            sys.stdout.write(f"\n[Active Context: {len(history)} messages]\n")
-            for idx, msg in enumerate(history, 1):
-                preview = msg["content"].replace("\n", " ")[:60]
-                sys.stdout.write(f"  {idx}. [{msg['role']}]: {preview}...\n")
+            previews = session.get_preview()
+            sys.stdout.write(f"\n[Active Context: {len(session.messages)} messages]\n")
+            for idx, role, snippet in previews:
+                sys.stdout.write(f"  {idx}. [{role}]: {snippet}...\n")
         return True
 
     sys.stdout.write(f"\n[Unknown command: '{cmd}'. Type /help for options.]\n")
@@ -51,7 +52,7 @@ def handle_slash_command(cmd: str, history: list[dict[str, Any]]) -> bool:
 
 def run_chat_loop(engine: InferenceEngine) -> None:
     """Executes the interactive Read-Eval-Print Loop (REPL)."""
-    history: list[dict[str, Any]] = []
+    session = Session()
 
     sys.stdout.write("==================================================\n")
     sys.stdout.write("  lclaude - Local Inference Terminal\n")
@@ -73,10 +74,10 @@ def run_chat_loop(engine: InferenceEngine) -> None:
             continue
 
         if user_input.startswith("/"):
-            handle_slash_command(user_input, history)
+            handle_slash_command(user_input, session)
             continue
 
-        history.append({"role": "user", "content": user_input})
+        session.add_message('user', user_input)
         sys.stdout.write("\nAssistant: ")
         sys.stdout.flush()
 
@@ -84,7 +85,7 @@ def run_chat_loop(engine: InferenceEngine) -> None:
 
         # stream generation
         try:
-            for token in engine.stream_chat(history):
+            for token in engine.stream_chat(session.messages):
                 sys.stdout.write(token)
                 sys.stdout.flush()
                 accumulated_tokens.append(token)
@@ -92,26 +93,20 @@ def run_chat_loop(engine: InferenceEngine) -> None:
             sys.stdout.write("\n")
 
             # Finalize assistant response in history on clean completion
-            history.append(
-                {"role": "assistant", "content": "".join(accumulated_tokens)}
-            )
+            session.add_message('assistant', "".join(accumulated_tokens))
 
         except KeyboardInterrupt:
             # Traps Ctrl+C DURING active generation
             sys.stdout.write("\n\n[Generation aborted by user]\n")
-            # State Rollback: Remove the unfulfilled user prompt
-            if history and history[-1]["role"] == "user":
-                history.pop()
+            session.rollback()
 
         except OllamaConnectionError as exc:
             sys.stderr.write(f"\n\n[Connection Error]: {exc}\n")
-            if history and history[-1]["role"] == "user":
-                history.pop()
+            session.rollback()
 
         except OllamaEngineError as exc:
             sys.stderr.write(f"\n\n[Engine Error]: {exc}\n")
-            if history and history[-1]["role"] == "user":
-                history.pop()
+            session.rollback()
 
 
 def main() -> None:
