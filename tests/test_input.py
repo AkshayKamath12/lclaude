@@ -42,7 +42,10 @@ class Editor:
 
     async def finish(self, text="\r"):
         self.pipe.send_text(text)
-        return await asyncio.wait_for(self.task, 3)
+        result = await asyncio.wait_for(self.task, 3)
+        if isinstance(result, str):
+            return self.reader._restore_pasted_text(result)
+        return result
 
     @asynccontextmanager
     async def running(self):
@@ -109,10 +112,11 @@ def test_bracketed_paste_waits_for_submission(ending):
                 await editor.send("prefix suffix" + LEFT * 6)
                 await editor.send(paste(ending + "  code" + ending + "/exit" + ending))
                 expected = "prefix \n  code\n/exit\nsuffix"
-                assert editor.buffer.text == expected
+                assert editor.buffer.text == "prefix <pasted 4 lines>suffix"
                 assert not editor.task.done()
                 assert editor.prompt.history.get_strings() == []
                 assert await editor.finish() == expected
+            assert editor.prompt.history.get_strings() == [expected]
     asyncio.run(scenario())
 
 
@@ -163,7 +167,7 @@ def test_vertical_movement_preserves_column_through_short_lines():
         with create_pipe_input() as pipe:
             editor = Editor(pipe)
             async with editor.running():
-                await editor.send(paste("abcdef\nx\nabcdef") + UP)
+                await editor.send("abcdef" + NEWLINE + "x" + NEWLINE + "abcdef" + UP)
                 assert editor.buffer.document.cursor_position_col == 1
                 await editor.send(UP)
                 assert editor.buffer.document.cursor_position_col == 6
@@ -171,6 +175,23 @@ def test_vertical_movement_preserves_column_through_short_lines():
                 assert editor.buffer.document.cursor_position_col == 6
                 await editor.send(LEFT * 3 + NEWLINE)
                 assert await editor.finish() == "abcdef\nx\nabc\ndef"
+    asyncio.run(scenario())
+
+
+def test_multiline_paste_uses_atomic_backspace_and_removes_hidden_payload():
+    async def scenario():
+        with create_pipe_input() as pipe:
+            editor = Editor(pipe)
+            async with editor.running():
+                await editor.send(paste("first\nsecond"))
+                assert editor.buffer.text == "<pasted 2 lines>"
+                await editor.send("\x08")
+                assert editor.buffer.text == ""
+                assert editor.reader._pasted_blocks == []
+                assert editor.prompt.history.get_strings() == []
+                await editor.send("replacement")
+                assert await editor.finish() == "replacement"
+            assert editor.prompt.history.get_strings() == ["replacement"]
     asyncio.run(scenario())
 
 

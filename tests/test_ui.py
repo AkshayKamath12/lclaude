@@ -57,16 +57,66 @@ class TestRenderStream(unittest.TestCase):
 
             self.assertEqual(result, "Here is a code snippet.")
             output = mock_stdout.getvalue()
-            self.assertTrue(output.startswith("\nAssistant: "))
+            self.assertTrue(output.startswith("Assistant: "))
             self.assertIn("Here is a code snippet.", output)
             self.assertTrue(output.endswith("\n"))
+
+    @patch("lclaude.ui.Live")
+    @patch("lclaude.ui.Console")
+    def test_terminal_stream_uses_rich_live_for_markdown(self, mock_console, mock_live) -> None:
+        class TerminalBuffer(io.StringIO):
+            def isatty(self) -> bool:
+                return True
+
+        stdout = TerminalBuffer()
+        
+        def tokens():
+            yield "# Result\n"
+            yield "print('ready')"
+
+        with patch("sys.stdout", stdout):
+            result = render_stream(tokens())
+
+        self.assertEqual(result, "# Result\nprint('ready')")
+        
+        # Verifies rich.console.Console was initialized correctly
+        mock_console.assert_called_once_with(file=stdout, force_terminal=True)
+        
+        # Verifies rich.live.Live was configured for smooth, visible streaming
+        mock_live.assert_called_once()
+        self.assertEqual(mock_live.call_args[1]["refresh_per_second"], 15)
+        self.assertEqual(mock_live.call_args[1]["vertical_overflow"], "visible")
+        
+        # Verifies Live.update() was called to repaint the terminal
+        self.assertGreater(mock_live.return_value.__enter__.return_value.update.call_count, 0)
+
+    def test_nonterminal_stream_stays_plain_and_single_pass(self) -> None:
+        with patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            self.assertEqual(render_stream(["plain", " text"]), "plain text")
+            output = stdout.getvalue()
+
+        self.assertEqual(output, "Assistant: plain text\n")
+        self.assertNotIn("\x1b[", output)
+
+    def test_interrupted_stream_does_not_replace_partial_output(self) -> None:
+        def interrupted():
+            yield "partial"
+            raise KeyboardInterrupt
+
+        with patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            with patch("lclaude.ui.Console") as console:
+                with self.assertRaises(StreamAbortedError):
+                    render_stream(interrupted())
+
+        console.assert_not_called()
+        self.assertIn("Assistant: partial", stdout.getvalue())
 
     def test_render_stream_empty(self) -> None:
         with patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
             result = render_stream([])
 
             self.assertEqual(result, "")
-            self.assertEqual(mock_stdout.getvalue(), "\nAssistant: \n")
+            self.assertEqual(mock_stdout.getvalue(), "Assistant: \n")
 
     def test_render_stream_aborted_by_keyboard_interrupt(self) -> None:
         def interrupted_generator():
@@ -80,7 +130,7 @@ class TestRenderStream(unittest.TestCase):
 
             output = mock_stdout.getvalue()
             # Confirms partial tokens flushed before abort and trailing newline emitted
-            self.assertIn("\nAssistant: Starting generation\n", output)
+            self.assertIn("Assistant: Starting generation", output)
 
 
 class TestTerminalDisplays(unittest.TestCase):
