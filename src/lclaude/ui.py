@@ -175,14 +175,21 @@ def render_stream(token_stream: Iterable[str]) -> str:
     # Interactive live terminal rendering
     console = Console(file=sys.stdout, force_terminal=True)
     try:
+        with console.status("Thinking…"):
+            tokens = iter(token_stream)
+            for token in tokens:
+                if token:
+                    accumulated.append(token)
+                    break
+
         # refresh_per_second=15 limits the repaint rate to prevent terminal flickering
         with Live(
-            Markdown("**Assistant:**\n"), 
+            Markdown(f"**Assistant:**\n\n{''.join(accumulated)}"),
             console=console, 
             refresh_per_second=15,
             vertical_overflow="visible"
         ) as live:
-            for token in token_stream:
+            for token in tokens:
                 accumulated.append(token)
                 # Live handles the terminal escape diffing automatically
                 live.update(Markdown(f"**Assistant:**\n\n{''.join(accumulated)}"))

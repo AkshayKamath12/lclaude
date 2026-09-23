@@ -4,6 +4,11 @@ import io
 import unittest
 from unittest.mock import patch
 
+import pytest
+from rich.console import Console
+from rich.live import Live
+
+from lclaude.engine import OllamaConnectionError, OllamaEngineError
 from lclaude.ui import (
     InputReader,
     StreamAbortedError,
@@ -131,6 +136,95 @@ class TestRenderStream(unittest.TestCase):
             output = mock_stdout.getvalue()
             # Confirms partial tokens flushed before abort and trailing newline emitted
             self.assertIn("Assistant: Starting generation", output)
+
+
+class TerminalBuffer(io.StringIO):
+    def isatty(self) -> bool:
+        return True
+
+
+@pytest.mark.parametrize("ending", [None, KeyboardInterrupt, OllamaEngineError,
+                                    OllamaConnectionError])
+@pytest.mark.parametrize("has_tokens", [False, True])
+def test_thinking_spinner_lifecycle(ending, has_tokens):
+    stdout = TerminalBuffer()
+    console = Console(
+        file=stdout, force_terminal=True, legacy_windows=False, _environ={"TERM": "xterm"}
+    )
+    status = console.status("Thinking…")
+    markdown_displays = []
+
+    def markdown_live(*args, **kwargs):
+        # The spinner must be gone before the Markdown display starts.
+        assert not status._live.is_started
+        live = Live(*args, **kwargs)
+        markdown_displays.append(live)
+        return live
+
+    def tokens():
+        assert status._live.is_started
+        status._live.refresh()  # Simulate an animation frame without a timed sleep.
+        yield ""
+        assert status._live.is_started
+        if has_tokens:
+            yield "first "
+            assert not status._live.is_started
+            assert markdown_displays[0].is_started
+            yield "**second**"
+        if ending is not None:
+            raise ending()
+
+    with (
+        patch("sys.stdout", stdout),
+        patch("lclaude.ui.Console", return_value=console),
+        patch.object(console, "status", return_value=status) as make_status,
+        patch("lclaude.ui.Live", side_effect=markdown_live),
+    ):
+        if ending is None:
+            assert render_stream(tokens()) == ("first **second**" if has_tokens else "")
+        else:
+            expected = StreamAbortedError if ending is KeyboardInterrupt else ending
+            with pytest.raises(expected):
+                render_stream(tokens())
+
+    make_status.assert_called_once_with("Thinking…")
+    assert not status._live.is_started
+    assert all(not live.is_started for live in markdown_displays)
+    output = stdout.getvalue()
+    assert "Thinking…" in output
+    # Rich restores the cursor and clears its transient status display.
+    assert "\x1b[?25h" in output
+    assert "\x1b[2K" in output
+    assert output.rfind("\x1b[?25h") > output.rfind("\x1b[?25l")
+    if has_tokens:
+        assert "first" in output
+        assert "second" in output
+
+
+@pytest.mark.parametrize("ending", [None, KeyboardInterrupt, OllamaEngineError])
+@pytest.mark.parametrize("has_tokens", [False, True])
+def test_redirected_stream_never_starts_spinner(ending, has_tokens):
+    def tokens():
+        if has_tokens:
+            yield "plain text"
+        if ending is not None:
+            raise ending()
+
+    with (
+        patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        patch("lclaude.ui.Console") as console,
+    ):
+        if ending is None:
+            assert render_stream(tokens()) == ("plain text" if has_tokens else "")
+        else:
+            expected = StreamAbortedError if ending is KeyboardInterrupt else ending
+            with pytest.raises(expected):
+                render_stream(tokens())
+
+    console.assert_not_called()
+    assert stdout.getvalue() == (
+        "Assistant: " + ("plain text" if has_tokens else "") + ("\n" if ending is None else "")
+    )
 
 
 class TestTerminalDisplays(unittest.TestCase):
