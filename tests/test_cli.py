@@ -4,11 +4,14 @@ import io
 import unittest
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from lclaude.cli import handle_slash_command, main, run_chat_loop
 from lclaude.engine import (
     InferenceEngine,
     ModelNotFoundError,
     OllamaConnectionError,
+    OllamaEngineError,
 )
 from lclaude.session import Session
 
@@ -67,12 +70,15 @@ class TestCLIChatLoop(unittest.TestCase):
         self.mock_engine = MagicMock(spec=InferenceEngine)
         self.mock_engine.model = "qwen2.5:7b-instruct"
         self.mock_engine.host = "http://localhost:11434"
+        signal_patch = patch("signal.signal")
+        signal_patch.start()
+        self.addCleanup(signal_patch.stop)
 
     def test_normal_chat_turn_records_history(self) -> None:
         """Simulates a prompt submission followed by an EOF exit."""
         self.mock_engine.stream_chat.return_value = iter(["Hello", " world", "!"])
 
-        with patch("builtins.input", side_effect=["Hi", EOFError]):
+        with patch("lclaude.ui.InputReader.read", side_effect=["Hi", None]):
             with patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
                 run_chat_loop(self.mock_engine)
 
@@ -96,7 +102,7 @@ class TestCLIChatLoop(unittest.TestCase):
         self.mock_engine.stream_chat.side_effect = interrupted_stream
 
         with patch("lclaude.cli.Session.rollback") as mock_rollback:
-            with patch("builtins.input", side_effect=["Write code", EOFError]):
+            with patch("lclaude.ui.InputReader.read", side_effect=["Write code", None]):
                 with patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
                     run_chat_loop(self.mock_engine)
 
@@ -111,7 +117,7 @@ class TestCLIChatLoop(unittest.TestCase):
         """Verifies SIGINT is set to SIG_IGN on prompt interrupt to protect shutdown."""
         import signal
 
-        with patch("builtins.input", side_effect=KeyboardInterrupt):
+        with patch("lclaude.ui.InputReader.read", return_value=None):
             with patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
                 run_chat_loop(self.mock_engine)
 
@@ -123,7 +129,7 @@ class TestCLIChatLoop(unittest.TestCase):
         self.mock_engine.stream_chat.side_effect = OllamaConnectionError("Daemon dropped")
 
         with patch("lclaude.cli.Session.rollback") as mock_rollback:
-            with patch("builtins.input", side_effect=["Ping", EOFError]):
+            with patch("lclaude.ui.InputReader.read", side_effect=["Ping", None]):
                 with patch("sys.stderr", new_callable=io.StringIO) as mock_stderr:
                     with patch("sys.stdout", new_callable=io.StringIO):
                         run_chat_loop(self.mock_engine)
@@ -163,6 +169,83 @@ class TestCLIMainStartup(unittest.TestCase):
 
             mock_instance.verify_ready.assert_called_once()
             mock_run_loop.assert_called_once_with(mock_instance)
+
+
+@pytest.mark.parametrize("command", ["/help", "  /HELP  ", "\n /history\n", "/help\n/exit"])
+def test_multiline_and_padded_commands_never_reach_inference(command):
+    engine = MagicMock(spec=InferenceEngine)
+    engine.model, engine.host = "model", "host"
+    session = Session()
+    with (
+        patch("lclaude.ui.InputReader") as reader_factory,
+        patch("lclaude.cli.Session", return_value=session),
+        patch("signal.signal"),
+        patch("sys.stdout", new_callable=io.StringIO) as output,
+    ):
+        reader_factory.return_value.read.side_effect = [" \n ", command, None]
+        run_chat_loop(engine)
+        reader_factory.assert_called_once_with()
+        engine.stream_chat.assert_not_called()
+        assert session.messages == []
+        if command == "/help\n/exit":
+            assert "Unknown command" in output.getvalue()
+
+
+@pytest.mark.parametrize(
+    "failure", [KeyboardInterrupt(), OllamaConnectionError("lost"), OllamaEngineError("failed")]
+)
+def test_multiline_failed_turn_rolls_back_and_next_turn_succeeds(failure):
+    engine = MagicMock(spec=InferenceEngine)
+    engine.model, engine.host = "model", "host"
+    session = Session()
+    session.add_message("user", "earlier")
+    session.add_message("assistant", "answer")
+    baseline = session.messages
+    failed_prompt = "  failed\n    prompt\n"
+    next_prompt = "  next\n    prompt\n"
+
+    def fail_stream():
+        yield "partial output"
+        raise failure
+
+    engine.stream_chat.side_effect = [fail_stream(), iter(["complete"])]
+    with (
+        patch("lclaude.ui.InputReader") as reader_factory,
+        patch("lclaude.cli.Session", return_value=session),
+        patch("signal.signal"),
+        patch("sys.stdout", new_callable=io.StringIO),
+        patch("sys.stderr", new_callable=io.StringIO),
+    ):
+        reader_factory.return_value.read.side_effect = [failed_prompt, next_prompt, None]
+        run_chat_loop(engine)
+        reader_factory.assert_called_once_with()
+    assert engine.stream_chat.call_args_list[0].args[0] == baseline + [
+        {"role": "user", "content": failed_prompt}
+    ]
+    assert engine.stream_chat.call_args_list[1].args[0] == baseline + [
+        {"role": "user", "content": next_prompt}
+    ]
+    assert session.messages == baseline + [
+        {"role": "user", "content": next_prompt},
+        {"role": "assistant", "content": "complete"},
+    ]
+
+
+def test_clear_reuses_input_reader_but_clears_conversation():
+    engine = MagicMock(spec=InferenceEngine)
+    engine.model, engine.host = "model", "host"
+    engine.stream_chat.side_effect = [iter(["one"]), iter(["two"])]
+    with (
+        patch("lclaude.ui.InputReader") as reader_factory,
+        patch("signal.signal"),
+        patch("sys.stdout", new_callable=io.StringIO),
+    ):
+        reader_factory.return_value.read.side_effect = ["first", "/clear", "second", None]
+        run_chat_loop(engine)
+        reader_factory.assert_called_once_with()
+    assert engine.stream_chat.call_args_list[1].args[0] == [
+        {"role": "user", "content": "second"}
+    ]
 
 
 if __name__ == "__main__":
