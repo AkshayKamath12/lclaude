@@ -11,44 +11,9 @@ from lclaude.engine import (
     OllamaConnectionError
 )
 
+from lclaude.commands import handle_slash_command
 from lclaude.session import Session
 
-def handle_slash_command(cmd: str, session: Session) -> bool:
-    """Processes slash commands and returns whether slash command was processed"""
-    command = cmd.strip().lower()
-
-    if command == "/exit":
-        sys.stdout.write("\nExiting session.")
-        sys.exit(0)
-        return True
-
-    if command == "/clear":
-        session.clear()
-        sys.stdout.write("\nCleared conversation history.")
-        return True
-
-    if command == "/help":
-        sys.stdout.write(
-            "\nAvailable Commands:\n"
-            "  /clear    Clear conversation context history\n"
-            "  /history  Display active turn count and roles\n"
-            "  /help     Show this help message\n"
-            "  /exit     Terminate the program\n"
-        )
-        return True
-
-    if command == "/history":
-        if not session.messages:
-            sys.stdout.write("\n[History is currently empty.]\n")
-        else:
-            previews = session.get_preview()
-            sys.stdout.write(f"\n[Active Context: {len(session.messages)} messages]\n")
-            for idx, role, snippet in previews:
-                sys.stdout.write(f"  {idx}. [{role}]: {snippet}...\n")
-        return True
-
-    sys.stdout.write(f"\n[Unknown command: '{cmd}'. Type /help for options.]\n")
-    return True
 
 def run_chat_loop(engine: InferenceEngine) -> None:
     """Executes the interactive Read-Eval-Print Loop (REPL)."""
