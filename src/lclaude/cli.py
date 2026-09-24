@@ -74,8 +74,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "-m",
         "--model",
-        default="qwen2.5:7b-instruct",
-        help="Ollama model tag to target (default: qwen2.5:7b-instruct)",
+        default=None,
+        help="Ollama model tag (default: qwen2.5:7b-instruct, or first installed model)",
     )
 
     parser.add_argument(
@@ -98,13 +98,13 @@ def main() -> None:
     args = parse_args()
 
     engine = InferenceEngine(
-        model=args.model,
+        model=args.model if args.model is not None else "qwen2.5:7b-instruct",
         host = args.host,
         timeout = args.timeout
     )
 
     try:
-        models = engine.verify_ready()
+        models = engine.verify_ready(allow_fallback=args.model is None)
     except (OllamaConnectionError, ModelNotFoundError) as exc:
         sys.stderr.write(f"Startup check failed: {exc}\n")
         sys.exit(1)

@@ -84,10 +84,15 @@ class InferenceEngine:
             f"Run 'ollama pull {name}' in your terminal to download it."
         )
 
-    def verify_ready(self) -> list[str]:
+    def verify_ready(self, *, allow_fallback: bool = False) -> list[str]:
         """Validate startup selection and return the process model catalog."""
         models = self.list_models()
-        self._resolve_model(self.model, models)
+        try:
+            self._resolve_model(self.model, models)
+        except ModelNotFoundError:
+            if not allow_fallback or not models:
+                raise
+            self.model = models[0]
         return models
 
     def set_model(self, name: str, models: list[str]) -> None:
