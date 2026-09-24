@@ -142,6 +142,11 @@ class TestCLIChatLoop(unittest.TestCase):
 class TestCLIMainStartup(unittest.TestCase):
     """Verifies startup lifecycle and engine pre-flight readiness checks."""
 
+    def setUp(self) -> None:
+        loader = patch("lclaude.cli.load_system_prompt", return_value="Project guidance")
+        loader.start()
+        self.addCleanup(loader.stop)
+
     @patch("lclaude.cli.InferenceEngine")
     def test_main_exits_on_readiness_failure(self, mock_engine_cls: MagicMock) -> None:
         """Exits with code 1 if verify_ready fails."""
@@ -169,7 +174,9 @@ class TestCLIMainStartup(unittest.TestCase):
             main()
 
             mock_instance.verify_ready.assert_called_once_with(allow_fallback=True)
-            mock_run_loop.assert_called_once_with(mock_instance, ["model"])
+            mock_run_loop.assert_called_once_with(
+                mock_instance, ["model"], system_prompt="Project guidance"
+            )
 
 
 @pytest.mark.parametrize("argv, installed, expected", [
@@ -178,7 +185,8 @@ class TestCLIMainStartup(unittest.TestCase):
     ([], ["alpha:latest", "qwen2.5:7b-instruct:latest"], "qwen2.5:7b-instruct"),
     (["--model", "zeta:latest"], ["alpha:latest", "zeta:latest"], "zeta:latest"),
 ])
-def test_startup_selects_model_and_reuses_catalog(argv, installed, expected):
+def test_startup_selects_model_and_reuses_catalog(argv, installed, expected, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     with (
         patch("sys.argv", ["lclaude", *argv]),
         patch("lclaude.engine.ollama.Client") as client,
@@ -202,7 +210,10 @@ def test_startup_selects_model_and_reuses_catalog(argv, installed, expected):
     (["--model", "missing"], ["alpha:latest"]),
     (["-m", "qwen2.5:7b-instruct"], ["alpha:latest"]),
 ])
-def test_startup_rejects_empty_catalog_or_missing_explicit_model(argv, installed, capsys):
+def test_startup_rejects_empty_catalog_or_missing_explicit_model(
+    argv, installed, capsys, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
     with (
         patch("sys.argv", ["lclaude", *argv]),
         patch("lclaude.engine.ollama.Client") as client,
