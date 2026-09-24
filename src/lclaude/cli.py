@@ -6,7 +6,8 @@ import sys
 from pathlib import Path
 
 from lclaude import ui
-from lclaude.commands import COMMANDS, SelectModel, handle_slash_command
+from lclaude.commands import COMMANDS, SelectModel, ShowContext, handle_slash_command
+from lclaude.context import ConservativeTokenCounter, ContextBudget
 from lclaude.engine import (
     InferenceEngine,
     ModelNotFoundError,
@@ -27,7 +28,19 @@ def run_chat_loop(
     ui.print_banner(engine.model, engine.host, commands)
     reader = ui.InputReader(commands=commands, models=models)
 
+    counter = ConservativeTokenCounter()
+    budget = ContextBudget(engine.num_predict)
+    last_completed_usage = None
+
     while True:
+        try:
+            limit = engine.context_limit()
+        except OllamaEngineError:
+            limit = None
+        except KeyboardInterrupt:
+            ui.print_aborted()
+            limit = None
+        reader.set_context(counter.count(session.messages), limit, budget)
         user_input = reader.read()
 
         if user_input is None:
@@ -49,18 +62,32 @@ def run_chat_loop(
                         selected = ui.choose_model(models, engine.model)
                     if selected is not None:
                         engine.set_model(selected, models)
+                        last_completed_usage = None
                         ui.print_model_changed(engine.model)
                 except KeyboardInterrupt:
                     ui.print_model_selection_cancelled()
                 except OllamaEngineError as exc:
                     ui.print_error("Model selection failed", str(exc))
+            elif isinstance(action, ShowContext):
+                ui.print_context(counter.count(session.messages), limit, budget, detail=True)
+                if last_completed_usage is not None:
+                    ui.print_usage(*last_completed_usage)
+            if session.is_empty:
+                last_completed_usage = None
             continue
 
-        session.add_message('user', user_input)
-
+        session.add_message("user", user_input)
+        count = counter.count(session.messages)
+        reader.set_context(count, limit, budget)
         try:
-            full_response = ui.render_stream(engine.stream_chat(session.messages))
+            full_response = ui.render_stream(
+                engine.stream_chat(session.messages), context_text=reader.context_text
+            )
             session.add_message("assistant", full_response)
+            if engine.last_usage is not None:
+                last_completed_usage = (engine.last_usage, count)
+            else:
+                last_completed_usage = None
         except ui.StreamAbortedError:
             session.rollback()
             ui.print_aborted()
@@ -94,7 +121,16 @@ def parse_args() -> argparse.Namespace:
         default=60.0,
         help="Client socket timeout in seconds (default: 60.0)",
     )
-    return parser.parse_args()
+    parser.add_argument("--num-ctx", type=int, default=None,
+                        help="Explicit Ollama context allocation; otherwise discover runtime size")
+    parser.add_argument("--max-response-tokens", type=int, default=2048,
+                        help="Maximum reply tokens (default: 2048)")
+    args = parser.parse_args()
+    if args.num_ctx is not None and args.num_ctx <= 0:
+        parser.error("--num-ctx must be positive")
+    if args.max_response_tokens <= 0:
+        parser.error("Reply tokens must be positive")
+    return args
 
 
 
@@ -110,7 +146,9 @@ def main() -> None:
     engine = InferenceEngine(
         model=args.model if args.model is not None else "qwen2.5:7b-instruct",
         host = args.host,
-        timeout = args.timeout
+        timeout = args.timeout,
+        num_ctx=args.num_ctx,
+        num_predict=args.max_response_tokens
     )
 
     try:

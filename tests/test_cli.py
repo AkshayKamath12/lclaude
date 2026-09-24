@@ -71,6 +71,9 @@ class TestCLIChatLoop(unittest.TestCase):
         self.mock_engine = MagicMock(spec=InferenceEngine)
         self.mock_engine.model = "qwen2.5:7b-instruct"
         self.mock_engine.host = "http://localhost:11434"
+        self.mock_engine.num_predict = 2048
+        self.mock_engine.context_limit.return_value = 8192
+        self.mock_engine.last_usage = None
         signal_patch = patch("signal.signal")
         signal_patch.start()
         self.addCleanup(signal_patch.stop)
@@ -233,6 +236,9 @@ def test_startup_rejects_empty_catalog_or_missing_explicit_model(
 def test_multiline_and_padded_commands_never_reach_inference(command):
     engine = MagicMock(spec=InferenceEngine)
     engine.model, engine.host = "model", "host"
+    engine.num_predict = 2048
+    engine.context_limit.return_value = 8192
+    engine.last_usage = None
     session = Session()
     with (
         patch("lclaude.ui.InputReader") as reader_factory,
@@ -257,6 +263,9 @@ def test_multiline_and_padded_commands_never_reach_inference(command):
 def test_multiline_failed_turn_rolls_back_and_next_turn_succeeds(failure):
     engine = MagicMock(spec=InferenceEngine)
     engine.model, engine.host = "model", "host"
+    engine.num_predict = 2048
+    engine.context_limit.return_value = 8192
+    engine.last_usage = None
     session = Session()
     session.add_message("user", "earlier")
     session.add_message("assistant", "answer")
@@ -296,6 +305,9 @@ def test_multiline_failed_turn_rolls_back_and_next_turn_succeeds(failure):
 def test_clear_reuses_input_reader_but_clears_conversation():
     engine = MagicMock(spec=InferenceEngine)
     engine.model, engine.host = "model", "host"
+    engine.num_predict = 2048
+    engine.context_limit.return_value = 8192
+    engine.last_usage = None
     engine.stream_chat.side_effect = [iter(["one"]), iter(["two"])]
     with (
         patch("lclaude.ui.InputReader") as reader_factory,
