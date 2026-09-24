@@ -3,6 +3,7 @@
 import argparse
 import signal
 import sys
+from pathlib import Path
 
 from lclaude import ui
 from lclaude.commands import COMMANDS, SelectModel, handle_slash_command
@@ -12,12 +13,15 @@ from lclaude.engine import (
     OllamaConnectionError,
     OllamaEngineError,
 )
+from lclaude.instructions import InstructionLoadError, load_system_prompt
 from lclaude.session import Session
 
 
-def run_chat_loop(engine: InferenceEngine, models: list[str]) -> None:
+def run_chat_loop(
+    engine: InferenceEngine, models: list[str], *, system_prompt: str | None = None
+) -> None:
     """Executes the interactive Read-Eval-Print Loop (REPL)."""
-    session = Session()
+    session = Session(system_prompt=system_prompt)
 
     commands = {name: info["desc"] for name, info in COMMANDS.items()}
     ui.print_banner(engine.model, engine.host, commands)
@@ -97,6 +101,12 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
+    try:
+        system_prompt = load_system_prompt(Path.cwd())
+    except (InstructionLoadError, OSError) as exc:
+        sys.stderr.write(f"Startup check failed: {exc}\n")
+        sys.exit(1)
+
     engine = InferenceEngine(
         model=args.model if args.model is not None else "qwen2.5:7b-instruct",
         host = args.host,
@@ -112,7 +122,7 @@ def main() -> None:
         sys.stderr.write(f"Unexpected startup failure: {exc}\n")
         sys.exit(1)
 
-    run_chat_loop(engine, models)
+    run_chat_loop(engine, models, system_prompt=system_prompt)
 
 if __name__ == "__main__":
     main()

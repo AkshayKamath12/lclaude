@@ -38,6 +38,18 @@ Models are not downloaded or preloaded by this command.
 With redirected input or output, `/model` lists available models without reading
 another input line; use `/model <model-name>` to select one.
 
+## Project instructions
+
+At startup, lclaude reads `AGENTS.md` from the directory where you launch it,
+falling back to `agents.md` when the uppercase filename is absent. It sends the
+file contents as the system prompt on every request. Parent and child directories
+are not searched. A missing or blank file uses a small default assistant prompt;
+an unreadable file or invalid UTF-8 stops startup with an error.
+
+Instructions stay loaded through `/clear` and model changes. Restart lclaude
+after editing the file. This also applies with redirected input. Files are loaded
+in full; token budgeting and oversized-context checks are not implemented yet.
+
 ## Writing prompts
 
 - **Enter** submits the complete prompt. Blank or whitespace-only input stays in
