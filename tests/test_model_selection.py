@@ -72,12 +72,13 @@ def test_startup_catalog_is_reused_for_multiple_selections():
     httpx.ConnectError("offline"), httpx.ReadTimeout("slow"),
     ollama.ResponseError("unavailable", status_code=500), KeyboardInterrupt(),
 ])
-def test_failed_startup_preserves_previous_model(failure):
+@pytest.mark.parametrize("allow_fallback", [False, True])
+def test_failed_startup_preserves_previous_model(failure, allow_fallback):
     engine = InferenceEngine(model="old")
     expected = KeyboardInterrupt if isinstance(failure, KeyboardInterrupt) else OllamaEngineError
     with patch.object(engine.ollama_client, "list", side_effect=failure):
         with pytest.raises(expected):
-            engine.verify_ready()
+            engine.verify_ready(allow_fallback=allow_fallback)
     assert engine.model == "old"
 
 

@@ -168,8 +168,54 @@ class TestCLIMainStartup(unittest.TestCase):
         with patch("sys.argv", ["lclaude"]):
             main()
 
-            mock_instance.verify_ready.assert_called_once()
+            mock_instance.verify_ready.assert_called_once_with(allow_fallback=True)
             mock_run_loop.assert_called_once_with(mock_instance, ["model"])
+
+
+@pytest.mark.parametrize("argv, installed, expected", [
+    ([], ["zeta:latest", "alpha:latest"], "alpha:latest"),
+    ([], ["alpha:latest", "qwen2.5:7b-instruct"], "qwen2.5:7b-instruct"),
+    ([], ["alpha:latest", "qwen2.5:7b-instruct:latest"], "qwen2.5:7b-instruct"),
+    (["--model", "zeta:latest"], ["alpha:latest", "zeta:latest"], "zeta:latest"),
+])
+def test_startup_selects_model_and_reuses_catalog(argv, installed, expected):
+    with (
+        patch("sys.argv", ["lclaude", *argv]),
+        patch("lclaude.engine.ollama.Client") as client,
+        patch("lclaude.cli.run_chat_loop") as loop,
+    ):
+        client.return_value.list.return_value = {
+            "models": [{"model": name} for name in installed],
+        }
+        main()
+        engine, models = loop.call_args.args
+        assert engine.model == expected
+        assert models == sorted(installed)
+        client.return_value.list.assert_called_once()
+        client.return_value.chat.return_value = iter([])
+        list(engine.stream_chat([]))
+        assert client.return_value.chat.call_args.kwargs["model"] == expected
+
+
+@pytest.mark.parametrize("argv, installed", [
+    ([], []),
+    (["--model", "missing"], ["alpha:latest"]),
+    (["-m", "qwen2.5:7b-instruct"], ["alpha:latest"]),
+])
+def test_startup_rejects_empty_catalog_or_missing_explicit_model(argv, installed, capsys):
+    with (
+        patch("sys.argv", ["lclaude", *argv]),
+        patch("lclaude.engine.ollama.Client") as client,
+        patch("lclaude.cli.run_chat_loop") as loop,
+    ):
+        client.return_value.list.return_value = {
+            "models": [{"model": name} for name in installed],
+        }
+        with pytest.raises(SystemExit) as error:
+            main()
+        assert error.value.code == 1
+        loop.assert_not_called()
+        assert "ollama pull" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("command", ["/help", "  /HELP  ", "\n /history\n", "/help\n/exit"])

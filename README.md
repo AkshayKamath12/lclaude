@@ -20,7 +20,10 @@ uv tool install git+https://github.com/AkshayKamath12/lclaude.git
 lclaude
 ```
 
-Use another downloaded model with `lclaude --model <model-name>`.
+By default, lclaude uses `qwen2.5:7b-instruct` if installed, otherwise the first
+installed model alphabetically. If no models are installed, startup shows a
+download instruction. Use `lclaude --model <model-name>` to require a specific
+downloaded model; an unavailable explicit selection produces an error.
 
 During a session, `/model` opens a picker of models available on the configured
 Ollama server. Use **Up/Down** and **Enter** to select; **Escape** or **Ctrl+C**
