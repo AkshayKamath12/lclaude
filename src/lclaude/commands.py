@@ -9,6 +9,15 @@ from lclaude.session import Session
 
 
 @dataclass(frozen=True)
+class ShowContext:
+    """Request application-coordinated context accounting."""
+
+
+def _handle_context(session: Session) -> ShowContext:
+    return ShowContext()
+
+
+@dataclass(frozen=True)
 class SelectModel:
     """Request application-coordinated model selection."""
 
@@ -48,10 +57,11 @@ def _handle_exit(session: Session) -> bool:
 
 class Command(TypedDict):
     desc: str
-    handler: Callable[[Session], bool | SelectModel]
+    handler: Callable[[Session], bool | SelectModel | ShowContext]
 
 
 COMMANDS: dict[str, Command] = {
+    "/context": {"desc": "Show prompt budget and token usage", "handler": _handle_context},
     "/model": {
         "desc": "Select a model or /model <name>",
         "handler": _handle_model,
@@ -74,7 +84,7 @@ COMMANDS: dict[str, Command] = {
     },
 }
 
-def handle_slash_command(cmd: str, session: Session) -> bool | SelectModel:
+def handle_slash_command(cmd: str, session: Session) -> bool | SelectModel | ShowContext:
     """Main point of entry for slash command handling"""
     command = cmd.strip().lower()
 

@@ -128,7 +128,7 @@ def test_empty_picker_does_not_open_terminal(capsys):
     ("/model", "new", KeyboardInterrupt()),
 ])
 def test_loop_preserves_history_and_continues(command, selection, failure):
-    engine = InferenceEngine(model="old")
+    engine = InferenceEngine(model="old", num_ctx=8192)
     session = Session()
     session.add_message("user", "earlier")
     session.add_message("assistant", "answer")

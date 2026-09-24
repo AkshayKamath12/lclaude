@@ -129,6 +129,9 @@ def test_loaded_prompt_survives_turns_clear_model_change_and_interrupt(
         client.return_value.list.return_value = {
             "models": [{"model": "old"}, {"model": "new"}]
         }
+        client.return_value.ps.return_value = {"models": [
+            {"model": name, "context_length": 8192} for name in ("old", "new")
+        ]}
         chat = client.return_value.chat
         chat.side_effect = [
             iter([{"message": {"content": "one"}}]),

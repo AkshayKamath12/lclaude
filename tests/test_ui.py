@@ -269,3 +269,83 @@ class TestTerminalDisplays(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@pytest.mark.parametrize("ending", [None, KeyboardInterrupt, OllamaEngineError])
+def test_pinned_footer_restores_scroll_region(ending):
+    from lclaude.ui import pinned_footer
+
+    stdout = TerminalBuffer()
+    console = Console(file=stdout, force_terminal=True, legacy_windows=False,
+                      width=80, height=24)
+    try:
+        with pinned_footer(console, "Prompt ~100 / 8,192 tokens") as refresh:
+            assert "\x1b[1;23r" in stdout.getvalue()
+            assert "\x1b[24;1H" in stdout.getvalue()
+            refresh()
+            assert stdout.getvalue().count("Prompt ~100") == 1
+            if ending:
+                raise ending()
+    except (KeyboardInterrupt, OllamaEngineError):
+        pass
+    assert "\x1b[r" in stdout.getvalue()
+    assert stdout.getvalue().endswith("\x1b[2K\x1b8")
+
+
+def test_footer_resizes_and_unknown_is_silent():
+    from lclaude.ui import pinned_footer
+
+    stdout = TerminalBuffer()
+    console = Console(file=stdout, force_terminal=True, legacy_windows=False,
+                      width=80, height=24)
+    with pinned_footer(console, "") as refresh:
+        refresh()
+    assert stdout.getvalue() == ""
+    with pinned_footer(console, "Prompt ~100") as refresh:
+        console.height = 30
+        refresh()
+        assert "\x1b[1;29r" in stdout.getvalue()
+        assert "\x1b[30;1H" in stdout.getvalue()
+
+
+def test_input_toolbar_updates_in_place_and_hides_unknown(capsys):
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from lclaude.context import ContextBudget, PromptCount
+
+    with create_pipe_input() as pipe:
+        reader = InputReader(input_stream=pipe, output_stream=DummyOutput())
+        reader.set_context(PromptCount(1, 2, 3), None, ContextBudget())
+        assert reader._prompt.bottom_toolbar is None
+        reader.set_context(PromptCount(1, 2, 3), 8192, ContextBudget())
+        assert reader._prompt.bottom_toolbar == (
+            "Prompt ~6 / 8,192 tokens | 2,048 reserved for reply"
+        )
+        reader.set_context(PromptCount(1, 200, 3), 4096, ContextBudget())
+        assert "~204 / 4,096" in reader._prompt.bottom_toolbar
+        assert capsys.readouterr().out == ""
+
+
+def test_toolbar_row_visibility_tracks_runtime_allocation():
+    from prompt_toolkit.application.current import set_app
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from lclaude.context import ContextBudget, PromptCount
+
+    with create_pipe_input() as pipe:
+        reader = InputReader(input_stream=pipe, output_stream=DummyOutput())
+        prompt = reader._prompt
+        # Exercise the library's actual row visibility, not just the text value.
+        toolbar = prompt.layout.container.children[-1]
+        with set_app(prompt.app):
+            prompt.app.renderer._min_available_height = 24
+            assert not toolbar.filter()
+            reader.set_context(PromptCount(1, 2, 3), 4096, ContextBudget())
+            assert toolbar.filter()
+            # Switching to a cold model must remove the row again.
+            reader.set_context(PromptCount(1, 2, 3), None, ContextBudget())
+            assert not toolbar.filter()
+            reader.set_context(PromptCount(1, 2, 3), 8192, ContextBudget())
+            assert toolbar.filter()

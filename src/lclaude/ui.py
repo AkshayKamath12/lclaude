@@ -2,7 +2,8 @@
 
 import re
 import sys
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Generator, Iterable, Mapping
+from contextlib import contextmanager
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.application import Application
@@ -25,6 +26,9 @@ from prompt_toolkit.validation import Validator
 from rich.console import Console
 from rich.live import Live
 from rich.markdown import Markdown
+
+from lclaude.context import ContextBudget, PromptCount
+from lclaude.engine import Usage
 
 
 class StreamAbortedError(Exception):
@@ -172,6 +176,7 @@ class InputReader:
         self._prompt: PromptSession[str] | None = None
         self._pasted_blocks: list[tuple[str, str]] = []
         self._completion_suppressed = False
+        self._context_text = ""
 
         if interactive:
             bindings = KeyBindings()
@@ -250,6 +255,7 @@ class InputReader:
             self._prompt = PromptSession[str](
                 "\n> ",
                 multiline=True,
+                bottom_toolbar=None,
                 prompt_continuation="... ",
                 history=_PromptHistory(self._pasted_blocks),
                 enable_history_search=False,
@@ -304,6 +310,19 @@ class InputReader:
 
             self._prompt.default_buffer.insert_text = custom_insert_text  # type: ignore[method-assign]
 
+    @property
+    def context_text(self) -> str:
+        return self._context_text
+
+    def set_context(self, count: PromptCount, limit: int | None, budget: ContextBudget) -> None:
+        """Replace the footer in place without writing into the transcript."""
+        self._context_text = context_status(count, limit, budget)
+        if self._prompt is not None:
+            # An empty callback result still paints the toolbar background.
+            # PromptSession hides the entire row only when the option is None.
+            self._prompt.bottom_toolbar = self._context_text or None
+            self._prompt.app.invalidate()
+
     def _has_nonblank_content(self, text: str) -> bool:
         for placeholder, actual in self._pasted_blocks:
             text = text.replace(placeholder, actual, 1)
@@ -329,7 +348,7 @@ class InputReader:
             return None
 
 
-def render_stream(token_stream: Iterable[str]) -> str:
+def render_stream(token_stream: Iterable[str], *, context_text: str = "") -> str:
     """Streams response tokens and renders live Markdown concurrently."""
     accumulated: list[str] = []
     
@@ -349,9 +368,21 @@ def render_stream(token_stream: Iterable[str]) -> str:
     # Interactive live terminal rendering
     console = Console(file=sys.stdout, force_terminal=True)
     try:
+        with pinned_footer(console, context_text) as refresh_footer:
+            return _render_terminal_stream(token_stream, console, refresh_footer)
+    except KeyboardInterrupt:
+        raise StreamAbortedError() from None
+
+
+def _render_terminal_stream(
+    token_stream: Iterable[str], console: Console, refresh_footer: Callable[[], None],
+) -> str:
+    accumulated: list[str] = []
+    try:
         with console.status("Thinking…"):
             tokens = iter(token_stream)
             for token in tokens:
+                refresh_footer()
                 if token:
                     accumulated.append(token)
                     break
@@ -364,6 +395,7 @@ def render_stream(token_stream: Iterable[str]) -> str:
             vertical_overflow="visible"
         ) as live:
             for token in tokens:
+                refresh_footer()
                 accumulated.append(token)
                 # Live handles the terminal escape diffing automatically
                 live.update(Markdown(f"**Assistant:**\n\n{''.join(accumulated)}"))
@@ -395,3 +427,95 @@ def print_startup_error(message: str) -> None:
     """Prints fatal startup verification failures to stderr."""
     sys.stderr.write(f"Startup check failed: {message}\n")
     sys.stderr.flush()
+
+
+def context_status(count: PromptCount, limit: int | None, budget: ContextBudget) -> str:
+    """No denominator or placeholder until a real allocation is known."""
+    if limit is None:
+        return ""
+    marker = "~" if count.estimated else ""
+    return (
+        f"Prompt {marker}{count.total:,} / {limit:,} tokens | "
+        f"{budget.response_tokens:,} reserved for reply"
+    )
+
+
+@contextmanager
+def pinned_footer(console: Console, text: str) -> Generator[Callable[[], None], None, None]:
+    """Reserve the terminal's bottom row while Rich renders above it.
+
+    PromptSession owns the bottom toolbar during input. During generation, a VT
+    scroll region keeps output above the same row, without taking over scrollback
+    or switching to an alternate screen. Always restore the region on exit.
+    """
+    if not text or console.legacy_windows:
+        yield lambda: None
+        return
+    dimensions: tuple[int, int] | None = None
+
+    def refresh() -> None:
+        nonlocal dimensions
+        width, height = console.size
+        if height < 3 or width < 2:
+            return
+        size = (width, height)
+        if size == dimensions:
+            return
+        dimensions = size
+        # Hold Rich's output lock so its animation cannot interleave control bytes.
+        with console:
+            # Make a blank row below the cursor, including when input ended on
+            # the last screen row. Keep Rich's cursor above the reserved footer.
+            console.file.write("\n\x1b[1A\r")
+            console.file.write(
+                f"\x1b7\x1b[1;{height - 1}r\x1b[{height};1H\x1b[2K"
+                f"\x1b[7m{text[:width - 1]}\x1b[0m\x1b8"
+            )
+            console.file.flush()
+
+    try:
+        refresh()
+        yield refresh
+    finally:
+        if dimensions is not None:
+            with console:
+                console.file.write("\x1b7\x1b[r" + f"\x1b[{dimensions[1]};1H\x1b[2K\x1b8")
+                console.file.flush()
+
+
+def print_context(
+    count: PromptCount, limit: int | None, budget: ContextBudget, *, detail: bool = False,
+) -> None:
+    """Explicit /context details; routine updates belong only in the footer."""
+    if not detail:
+        status = context_status(count, limit, budget)
+        if status:
+            sys.stdout.write(status + "\n")
+        return
+
+    marker = "~" if count.estimated else ""
+    capacity = f" / {limit:,}" if limit is not None else ""
+    sys.stdout.write(
+        "Current context (tokens)\n"
+        f"  Instructions   {marker}{count.instructions:,}\n"
+        f"  Conversation   {marker}{count.conversation:,}\n"
+        f"  Formatting     {marker}{count.overhead:,}\n"
+        f"  Total          {marker}{count.total:,}{capacity}\n"
+        f"  Reply limit    {budget.response_tokens:,}\n"
+    )
+
+
+def print_usage(usage: Usage, predicted: PromptCount) -> None:
+    """Keep actual usage for the previous request separate from current context."""
+    if usage.prompt_eval_count is None and usage.eval_count is None:
+        return
+    sys.stdout.write("\nLast request (tokens reported by Ollama)\n")
+    if usage.prompt_eval_count is not None:
+        marker = "~" if predicted.estimated else ""
+        label = "estimated" if predicted.estimated else "counted"
+        sys.stdout.write(
+            f"  Prompt         {usage.prompt_eval_count:,} "
+            f"({label} {marker}{predicted.total:,} before sending)\n"
+        )
+    if usage.eval_count is not None:
+        sys.stdout.write(f"  Reply          {usage.eval_count:,}\n")

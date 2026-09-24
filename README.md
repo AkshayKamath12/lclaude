@@ -48,7 +48,7 @@ an unreadable file or invalid UTF-8 stops startup with an error.
 
 Instructions stay loaded through `/clear` and model changes. Restart lclaude
 after editing the file. This also applies with redirected input. Files are loaded
-in full; token budgeting and oversized-context checks are not implemented yet.
+in full; context estimates are advisory and never prevent generation.
 
 ## Writing prompts
 
@@ -83,3 +83,32 @@ The editor uses `prompt_toolkit` for Windows, macOS, and Linux terminal support.
 Shortcut delivery depends on terminal configuration. When stdin or stdout is
 redirected, lclaude retains its simple line-oriented input: each line is a separate
 submission with outer whitespace trimmed, and interactive editing is disabled.
+
+
+## Context display
+
+Interactive sessions show a fixed status bar at the bottom, updated as the
+conversation grows or the selected model changes. It stays below streamed output
+and does not add status lines to the transcript. When the runtime context size is
+unknown, the bar is hidden. Redirected output has no automatic context display.
+`/context` explicitly shows instructions (or the default prompt), conversation
+content, formatting overhead, and usage reported for the last completed request.
+
+```sh
+lclaude --num-ctx 8192 --max-response-tokens 2048
+```
+
+Explicit `--num-ctx` is passed to Ollama. Otherwise the display uses the selected
+model's loaded `context_length` from `/api/ps`, never its architectural maximum.
+Context discovery errors and oversized estimates do not block chat. lclaude does
+not preload a model just to populate the display or remove conversation messages.
+Ollama controls what happens when the actual context allocation is exhausted.
+
+Counts prefixed with `~` are approximate: content is estimated at three UTF-8
+bytes per token, plus 16 tokens per message and 16 for reply framing. This heuristic
+is replaceable and is not an exact tokenizer or a fit guarantee. Ollama's reported
+`prompt_eval_count` and `eval_count` appear separately in `/context`, including a
+comparison with the estimate for that completed request.
+
+The reply limit defaults to 2,048 tokens and is passed as `num_predict`. Neither
+the estimate nor an unknown context size prevents a response.
