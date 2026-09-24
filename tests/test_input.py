@@ -26,12 +26,12 @@ def paste(text):
 class Editor:
     """Bounded async harness with a key-processing barrier instead of sleeps."""
 
-    def __init__(self, pipe):
+    def __init__(self, pipe, models=()):
         self.pipe = pipe
         self.output = DummyOutput()
         self.reader = InputReader(
             commands={name: info["desc"] for name, info in COMMANDS.items()},
-            input_stream=pipe, output_stream=self.output,
+            input_stream=pipe, output_stream=self.output, models=models,
         )
         self.prompt = self.reader._prompt
         self.processed = asyncio.Event()
@@ -397,6 +397,43 @@ def test_completion_opens_filters_and_displays_registry_descriptions():
                 assert editor.buffer.complete_state is not None
                 assert editor.buffer.text == "/H"
                 assert await editor.finish() == "/history"
+    asyncio.run(scenario())
+
+
+def test_model_argument_completion_filters_and_preserves_command():
+    async def scenario():
+        with create_pipe_input() as pipe:
+            editor = Editor(pipe, models=["llama:latest", "Qwen:7b", "Qwen:14b"])
+            async with editor.running():
+                await editor.send("/model ")
+                assert [c.text for c in editor.buffer.complete_state.completions] == [
+                    "llama:latest", "Qwen:7b", "Qwen:14b",
+                ]
+                await editor.send("qw")
+                assert [c.text for c in editor.buffer.complete_state.completions] == [
+                    "Qwen:7b", "Qwen:14b",
+                ]
+                await editor.send("z")
+                assert editor.buffer.complete_state is None
+                await editor.send("\x08")
+                await editor.send(DOWN + "\t")
+                assert editor.buffer.text == "/model Qwen:14b"
+                assert await editor.finish() == "/model Qwen:14b"
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("keys, expected", [
+    ("/model qw\r", "/model Qwen:7b"),
+    ("/model unknown\r", "/model unknown"),
+    (paste("/model qw") + "\r", "/model qw"),
+    ("/model " + NEWLINE + "qw\r", "/model \nqw"),
+])
+def test_model_completion_submission_and_suppression(keys, expected):
+    async def scenario():
+        with create_pipe_input() as pipe:
+            editor = Editor(pipe, models=["Qwen:7b"])
+            async with editor.running():
+                assert await editor.finish(keys) == expected
     asyncio.run(scenario())
 
 

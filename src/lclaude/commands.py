@@ -2,9 +2,21 @@
 
 import sys
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import TypedDict
 
 from lclaude.session import Session
+
+
+@dataclass(frozen=True)
+class SelectModel:
+    """Request application-coordinated model selection."""
+
+    name: str | None = None
+
+
+def _handle_model(session: Session) -> SelectModel:
+    return SelectModel()
 
 
 def _handle_clear(session: Session) -> bool:
@@ -36,10 +48,14 @@ def _handle_exit(session: Session) -> bool:
 
 class Command(TypedDict):
     desc: str
-    handler: Callable[[Session], bool]
+    handler: Callable[[Session], bool | SelectModel]
 
 
 COMMANDS: dict[str, Command] = {
+    "/model": {
+        "desc": "Select a model or /model <name>",
+        "handler": _handle_model,
+    },
     "/clear": {
         "desc": "Clear conversation context history",
         "handler": _handle_clear,
@@ -58,9 +74,16 @@ COMMANDS: dict[str, Command] = {
     },
 }
 
-def handle_slash_command(cmd: str, session: Session) -> bool:
+def handle_slash_command(cmd: str, session: Session) -> bool | SelectModel:
     """Main point of entry for slash command handling"""
     command = cmd.strip().lower()
+
+    parts = cmd.strip().split()
+    if parts and parts[0].lower() == "/model" and len(parts) > 1:
+        if len(parts) == 2:
+            return SelectModel(parts[1])
+        sys.stdout.write("\nUsage: /model [name]\n")
+        return True
 
     if command in COMMANDS:
         return COMMANDS[command]["handler"](session)

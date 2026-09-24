@@ -22,6 +22,19 @@ lclaude
 
 Use another downloaded model with `lclaude --model <model-name>`.
 
+During a session, `/model` opens a picker of models available on the configured
+Ollama server. Use **Up/Down** and **Enter** to select; **Escape** or **Ctrl+C**
+cancels. `/model <model-name>` switches directly. Selection preserves conversation
+history and applies to the next prompt. If validation fails, the previous model
+stays selected. Type `/model ` followed by part of a name to see matching models;
+use **Up/Down** to navigate and **Tab** to complete or **Enter** to select.
+The startup model list is cached for the process lifetime and also used for
+selection validation. Restart lclaude to pick up newly installed models. Models
+removed after startup may fail on the next inference request.
+Models are not downloaded or preloaded by this command.
+With redirected input or output, `/model` lists available models without reading
+another input line; use `/model <model-name>` to select one.
+
 ## Writing prompts
 
 - **Enter** submits the complete prompt. Blank or whitespace-only input stays in

@@ -43,7 +43,7 @@ class InferenceEngine:
                 f" {action}. Ensure 'ollama serve' is running."
             ) from exc
         except ollama.ResponseError as exc:
-            if exc.status_code == 404:
+            if exc.status_code == 404 and action == "token streaming":
                 raise ModelNotFoundError(
                     f"Model '{self.model}' not found by Ollama."
                 ) from exc
@@ -59,8 +59,9 @@ class InferenceEngine:
                 f"Unexpected error during {action}: {exc}"
             ) from exc
 
-    def verify_ready(self) -> None:
-        with self._error_boundary("readiness check"):
+    def list_models(self) -> list[str]:
+        """List model names on the configured daemon without changing state."""
+        with self._error_boundary("listing models"):
             response = self.ollama_client.list()
 
             models = response.get("models", [])
@@ -70,19 +71,28 @@ class InferenceEngine:
                 if model_name:
                     model_names.append(model_name)
 
-            for model_name in model_names:
-                if (
-                    model_name == self.model
-                    or model_name == f"{self.model}:latest"
-                    or self.model == f"{model_name}:latest"
-                ):
-                    #found match, return early to avoid throwing error
-                    return
-                
-            raise ModelNotFoundError(
-                f"Model '{self.model}' is not available locally. "
-                f"Run 'ollama pull {self.model}' in your terminal to download it."
-            )
+            return sorted(set(model_names))
+
+    def _resolve_model(self, name: str, models: list[str]) -> str:
+        if name in models:
+            return name
+        for available in models:
+            if available == f"{name}:latest" or name == f"{available}:latest":
+                return available
+        raise ModelNotFoundError(
+            f"Model '{name}' is not available locally. "
+            f"Run 'ollama pull {name}' in your terminal to download it."
+        )
+
+    def verify_ready(self) -> list[str]:
+        """Validate startup selection and return the process model catalog."""
+        models = self.list_models()
+        self._resolve_model(self.model, models)
+        return models
+
+    def set_model(self, name: str, models: list[str]) -> None:
+        """Validate first so failed or interrupted selection preserves the model."""
+        self.model = self._resolve_model(name, models)
 
     def stream_chat(
         self,
