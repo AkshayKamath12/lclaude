@@ -5,15 +5,20 @@ import sys
 from collections.abc import Iterable, Mapping
 
 from prompt_toolkit import PromptSession
+from prompt_toolkit.application import Application
 from prompt_toolkit.buffer import Buffer, CompletionState
 from prompt_toolkit.completion import CompleteEvent, Completer, Completion, ConditionalCompleter
+from prompt_toolkit.data_structures import Point
 from prompt_toolkit.document import Document
 from prompt_toolkit.filters import Condition, has_completions
+from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.input import Input
 from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
 from prompt_toolkit.keys import Keys
-from prompt_toolkit.layout.controls import BufferControl
+from prompt_toolkit.layout import Layout
+from prompt_toolkit.layout.containers import Window
+from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.output import Output
 from prompt_toolkit.styles import Style
 from prompt_toolkit.validation import Validator
@@ -26,16 +31,98 @@ class StreamAbortedError(Exception):
     """Raised when token streaming is interrupted by the user (Ctrl+C)."""
 
 
+def choose_model(
+    models: list[str], current: str, *,
+    input_stream: Input | None = None, output_stream: Output | None = None,
+) -> str | None:
+    """Return a selection, or None; never query or mutate the inference engine."""
+    if not models:
+        print_error("Model selection", "No models available. Download one with ollama pull.")
+        return None
+    interactive = input_stream is not None or output_stream is not None or (
+        sys.stdin.isatty() and sys.stdout.isatty()
+    )
+    if not interactive:
+        sys.stdout.write("\nAvailable models (select with /model <name>):\n")
+        for name in models:
+            sys.stdout.write(f"  {name}{' (current)' if name == current else ''}\n")
+        return None
+
+    selected = models.index(current) if current in models else 0
+    bindings = KeyBindings()
+
+    @bindings.add("up")
+    def previous(event: KeyPressEvent) -> None:
+        nonlocal selected
+        selected = (selected - 1) % len(models)
+
+    @bindings.add("down")
+    def next_model(event: KeyPressEvent) -> None:
+        nonlocal selected
+        selected = (selected + 1) % len(models)
+
+    @bindings.add("enter")
+    def accept(event: KeyPressEvent) -> None:
+        event.app.exit(result=models[selected])
+
+    @bindings.add("escape")
+    @bindings.add("c-c")
+    @bindings.add("c-d")
+    @bindings.add("c-z")
+    def cancel(event: KeyPressEvent) -> None:
+        event.app.exit(result=None)
+
+    def content() -> FormattedText:
+        lines = [("", "Select model | Up/Down: move | Enter: select | Esc: cancel\n")]
+        for index, name in enumerate(models):
+            label = f"{'>' if index == selected else ' '} {name}"
+            if name == current:
+                label += " (current)"
+            lines.append(("reverse bold" if index == selected else "", label + "\n"))
+        return FormattedText(lines)
+
+    control = FormattedTextControl(
+        content, focusable=True, get_cursor_position=lambda: Point(x=0, y=selected + 1),
+    )
+    application: Application[str | None] = Application(
+        layout=Layout(Window(control, always_hide_cursor=True)),
+        key_bindings=bindings, input=input_stream, output=output_stream,
+        full_screen=False, erase_when_done=True,
+    )
+    try:
+        return application.run()
+    except (KeyboardInterrupt, EOFError):
+        return None
+
+
+def print_model_changed(model: str) -> None:
+    sys.stdout.write(f"\nModel selected: {model}\n")
+
+
+def print_model_selection_cancelled() -> None:
+    sys.stdout.write("\nModel selection cancelled.\n")
+
+
 class SlashCommandCompleter(Completer):
     """Present injected command metadata without knowing how commands execute."""
 
-    def __init__(self, commands: Mapping[str, str]) -> None:
+    def __init__(self, commands: Mapping[str, str], models: Iterable[str] = ()) -> None:
         self.commands = commands
+        self.models = tuple(models)
 
     def get_completions(
         self, document: Document, complete_event: CompleteEvent
     ) -> Iterable[Completion]:
         text = document.text
+        if document.cursor_position != len(text):
+            return
+        model_argument = re.fullmatch(r"/model[ \t]+([^\s]*)", text, re.IGNORECASE)
+        if model_argument and "/model" in self.commands:
+            prefix = model_argument.group(1)
+            for model in self.models:
+                if model.lower().startswith(prefix.lower()):
+                    yield Completion(model, start_position=-len(prefix))
+            return
         if (
             not text.startswith("/")
             or any(char.isspace() for char in text)
@@ -76,6 +163,7 @@ class InputReader:
 
     def __init__(
         self, *, commands: Mapping[str, str] | None = None,
+        models: Iterable[str] = (),
         input_stream: Input | None = None, output_stream: Output | None = None
     ) -> None:
         interactive = input_stream is not None or output_stream is not None or (
@@ -166,7 +254,7 @@ class InputReader:
                 history=_PromptHistory(self._pasted_blocks),
                 enable_history_search=False,
                 completer=ConditionalCompleter(
-                    SlashCommandCompleter(commands or {}),
+                    SlashCommandCompleter(commands or {}, models),
                     Condition(lambda: not self._completion_suppressed),
                 ),
                 complete_while_typing=False,

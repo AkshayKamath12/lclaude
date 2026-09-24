@@ -81,7 +81,7 @@ class TestCLIChatLoop(unittest.TestCase):
 
         with patch("lclaude.ui.InputReader.read", side_effect=["Hi", None]):
             with patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
-                run_chat_loop(self.mock_engine)
+                run_chat_loop(self.mock_engine, [self.mock_engine.model])
 
                 output = mock_stdout.getvalue()
                 self.assertIn("Assistant: Hello world!", output)
@@ -105,7 +105,7 @@ class TestCLIChatLoop(unittest.TestCase):
         with patch("lclaude.cli.Session.rollback") as mock_rollback:
             with patch("lclaude.ui.InputReader.read", side_effect=["Write code", None]):
                 with patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
-                    run_chat_loop(self.mock_engine)
+                    run_chat_loop(self.mock_engine, [self.mock_engine.model])
 
                     output = mock_stdout.getvalue()
                     self.assertIn("[Generation aborted by user]", output)
@@ -120,7 +120,7 @@ class TestCLIChatLoop(unittest.TestCase):
 
         with patch("lclaude.ui.InputReader.read", return_value=None):
             with patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
-                run_chat_loop(self.mock_engine)
+                run_chat_loop(self.mock_engine, [self.mock_engine.model])
 
                 mock_signal.assert_called_once_with(signal.SIGINT, signal.SIG_IGN)
                 self.assertIn("Session terminated by user.", mock_stdout.getvalue())
@@ -133,7 +133,7 @@ class TestCLIChatLoop(unittest.TestCase):
             with patch("lclaude.ui.InputReader.read", side_effect=["Ping", None]):
                 with patch("sys.stderr", new_callable=io.StringIO) as mock_stderr:
                     with patch("sys.stdout", new_callable=io.StringIO):
-                        run_chat_loop(self.mock_engine)
+                        run_chat_loop(self.mock_engine, [self.mock_engine.model])
 
                         self.assertIn("[Connection Error]: Daemon dropped", mock_stderr.getvalue())
                         mock_rollback.assert_called_once()
@@ -163,13 +163,13 @@ class TestCLIMainStartup(unittest.TestCase):
     ) -> None:
         """Launches REPL when verify_ready passes."""
         mock_instance = mock_engine_cls.return_value
-        mock_instance.verify_ready.return_value = None
+        mock_instance.verify_ready.return_value = ["model"]
 
         with patch("sys.argv", ["lclaude"]):
             main()
 
             mock_instance.verify_ready.assert_called_once()
-            mock_run_loop.assert_called_once_with(mock_instance)
+            mock_run_loop.assert_called_once_with(mock_instance, ["model"])
 
 
 @pytest.mark.parametrize("command", ["/help", "  /HELP  ", "\n /history\n", "/help\n/exit"])
@@ -184,9 +184,9 @@ def test_multiline_and_padded_commands_never_reach_inference(command):
         patch("sys.stdout", new_callable=io.StringIO) as output,
     ):
         reader_factory.return_value.read.side_effect = [" \n ", command, None]
-        run_chat_loop(engine)
+        run_chat_loop(engine, [engine.model])
         reader_factory.assert_called_once_with(
-            commands={name: info["desc"] for name, info in COMMANDS.items()}
+            commands={name: info["desc"] for name, info in COMMANDS.items()}, models=[engine.model]
         )
         engine.stream_chat.assert_not_called()
         assert session.messages == []
@@ -220,9 +220,9 @@ def test_multiline_failed_turn_rolls_back_and_next_turn_succeeds(failure):
         patch("sys.stderr", new_callable=io.StringIO),
     ):
         reader_factory.return_value.read.side_effect = [failed_prompt, next_prompt, None]
-        run_chat_loop(engine)
+        run_chat_loop(engine, [engine.model])
         reader_factory.assert_called_once_with(
-            commands={name: info["desc"] for name, info in COMMANDS.items()}
+            commands={name: info["desc"] for name, info in COMMANDS.items()}, models=[engine.model]
         )
     assert engine.stream_chat.call_args_list[0].args[0] == baseline + [
         {"role": "user", "content": failed_prompt}
@@ -246,9 +246,9 @@ def test_clear_reuses_input_reader_but_clears_conversation():
         patch("sys.stdout", new_callable=io.StringIO),
     ):
         reader_factory.return_value.read.side_effect = ["first", "/clear", "second", None]
-        run_chat_loop(engine)
+        run_chat_loop(engine, [engine.model])
         reader_factory.assert_called_once_with(
-            commands={name: info["desc"] for name, info in COMMANDS.items()}
+            commands={name: info["desc"] for name, info in COMMANDS.items()}, models=[engine.model]
         )
     assert engine.stream_chat.call_args_list[1].args[0] == [
         {"role": "user", "content": "second"}

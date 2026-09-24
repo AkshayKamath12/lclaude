@@ -5,7 +5,7 @@ import signal
 import sys
 
 from lclaude import ui
-from lclaude.commands import COMMANDS, handle_slash_command
+from lclaude.commands import COMMANDS, SelectModel, handle_slash_command
 from lclaude.engine import (
     InferenceEngine,
     ModelNotFoundError,
@@ -15,13 +15,13 @@ from lclaude.engine import (
 from lclaude.session import Session
 
 
-def run_chat_loop(engine: InferenceEngine) -> None:
+def run_chat_loop(engine: InferenceEngine, models: list[str]) -> None:
     """Executes the interactive Read-Eval-Print Loop (REPL)."""
     session = Session()
 
     commands = {name: info["desc"] for name, info in COMMANDS.items()}
     ui.print_banner(engine.model, engine.host, commands)
-    reader = ui.InputReader(commands=commands)
+    reader = ui.InputReader(commands=commands, models=models)
 
     while True:
         user_input = reader.read()
@@ -37,7 +37,19 @@ def run_chat_loop(engine: InferenceEngine) -> None:
             continue
 
         if user_input.lstrip().startswith("/"):
-            handle_slash_command(user_input, session)
+            action = handle_slash_command(user_input, session)
+            if isinstance(action, SelectModel):
+                try:
+                    selected = action.name
+                    if selected is None:
+                        selected = ui.choose_model(models, engine.model)
+                    if selected is not None:
+                        engine.set_model(selected, models)
+                        ui.print_model_changed(engine.model)
+                except KeyboardInterrupt:
+                    ui.print_model_selection_cancelled()
+                except OllamaEngineError as exc:
+                    ui.print_error("Model selection failed", str(exc))
             continue
 
         session.add_message('user', user_input)
@@ -92,7 +104,7 @@ def main() -> None:
     )
 
     try:
-        engine.verify_ready()
+        models = engine.verify_ready()
     except (OllamaConnectionError, ModelNotFoundError) as exc:
         sys.stderr.write(f"Startup check failed: {exc}\n")
         sys.exit(1)
@@ -100,7 +112,7 @@ def main() -> None:
         sys.stderr.write(f"Unexpected startup failure: {exc}\n")
         sys.exit(1)
 
-    run_chat_loop(engine)
+    run_chat_loop(engine, models)
 
 if __name__ == "__main__":
     main()
