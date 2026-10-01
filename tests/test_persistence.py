@@ -34,9 +34,10 @@ def test_round_trip_full_content_and_schema(store, chat):
     assert model == "model:7b"
     data = json.loads((store.directory / f"{chat.session_id}.json").read_text())
     assert set(data) == {"schema_version", "session_id", "project", "created_at", "updated_at",
-                         "model", "messages"}
+                         "model", "messages", "artifacts"}
+    assert data["schema_version"] == 2
     assert data["project"] == {"path": str(store.project)}
-    assert data["schema_version"] == 1
+    assert data["schema_version"] == 2
     assert data["messages"] == chat.conversation
 
 
@@ -79,7 +80,7 @@ def test_sessions_with_same_timestamp_sort_by_session_id(store):
 @pytest.mark.parametrize("invalid, error", [
     ("{", "Cannot load"),
     ("null", "JSON object"),
-    ('{"schema_version": 2}', "Unsupported schema_version"),
+    ('{"schema_version": 3}', "Unsupported schema_version"),
     ('{"schema_version": true}', "Unsupported schema_version"),
     ('{"schema_version": 1}', "Invalid schema"),
 ])

@@ -48,7 +48,9 @@ def test_switch_resolves_latest_and_next_request_uses_selection():
         patch.object(engine.ollama_client, "list", return_value={
             "models": [{"model": "new:latest"}],
         }),
-        patch.object(engine.ollama_client, "chat", return_value=iter([])) as chat,
+        patch.object(engine.ollama_client, "chat", return_value=iter([
+            {"done": True, "message": {}},
+        ])) as chat,
     ):
         engine.set_model("new", ["new:latest"])
         assert engine.model == "new:latest"
@@ -142,7 +144,7 @@ def test_loop_preserves_history_and_continues(command, selection, failure):
         patch.object(engine.ollama_client, "list", side_effect=AssertionError("no refetch")),
         patch.object(engine, "set_model", wraps=engine.set_model, side_effect=failure),
         patch.object(engine.ollama_client, "chat", return_value=iter([
-            {"message": {"content": "done"}},
+            {"done": True, "message": {"content": "done"}},
         ])) as chat,
         patch("signal.signal"),
     ):

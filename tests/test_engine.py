@@ -77,7 +77,7 @@ class TestInferenceEngine(unittest.TestCase):
             {"message": {"role": "assistant", "content": "Hello"}},
             {"message": {"role": "assistant", "content": " world"}},
             {"message": {"role": "assistant", "content": "!"}},
-            {"message": {"role": "assistant", "content": ""}},  # empty done token
+            {"done": True, "message": {"role": "assistant", "content": ""}},
         ]
         with patch.object(self.engine.ollama_client, "chat", return_value=iter(mock_chunks)):
             messages = [{"role": "user", "content": "Hi"}]

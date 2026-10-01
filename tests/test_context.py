@@ -48,8 +48,8 @@ def test_unicode_code_and_empty_message_overhead():
 ])
 def test_runtime_discovery_uses_ps_and_alias(response):
     engine = InferenceEngine(model="model")
-    with patch.object(engine.ollama_client, "ps", return_value=response), patch.object(
-        engine.ollama_client, "show", side_effect=AssertionError("no architectural limit")
+    with patch.object(engine.ollama_client, "ps", return_value=response), patch(
+        "ollama.Client.show", side_effect=AssertionError("no architectural limit")
     ):
         assert engine.context_limit() == 8192
 
@@ -76,7 +76,7 @@ def test_cold_model_load_then_query():
 def test_explicit_context_and_response_are_sent_and_authoritative():
     engine = InferenceEngine(num_ctx=8192, num_predict=2048)
     with patch.object(engine.ollama_client, "ps") as ps, patch.object(
-        engine.ollama_client, "chat", return_value=iter([])
+        engine.ollama_client, "chat", return_value=iter([{"done": True, "message": {}}])
     ) as chat:
         assert engine.context_limit(load=True) == 8192
         list(engine.stream_chat([], options={"temperature": 0.2, "num_ctx": 1}))
@@ -127,7 +127,7 @@ def test_oversize_never_blocks_inference(oversized, capsys):
     prompt = "hello" if oversized == "instructions" else "x\n" * 30000
     engine = InferenceEngine(model="old", num_ctx=8192)
     with patch.object(engine.ollama_client, "chat", return_value=iter([
-        {"message": {"content": "hello back"}},
+        {"done": True, "message": {"content": "hello back"}},
     ])) as chat:
         run_loop(engine, session, [prompt])
         chat.assert_called_once()
@@ -142,7 +142,9 @@ def test_discovery_failure_does_not_block_response(failure):
     engine = InferenceEngine(model="old")
     session = Session("rules")
     with patch.object(engine.ollama_client, "ps", side_effect=failure), patch.object(
-        engine.ollama_client, "chat", return_value=iter([{"message": {"content": "hi"}}])
+        engine.ollama_client, "chat", return_value=iter([
+            {"done": True, "message": {"content": "hi"}},
+        ])
     ) as chat:
         run_loop(engine, session, ["hello"])
         chat.assert_called_once()
@@ -155,7 +157,7 @@ def test_unavailable_limit_is_silent_and_never_loads_or_blocks(capsys):
     with patch.object(engine.ollama_client, "ps", return_value={"models": []}), patch.object(
         engine.ollama_client, "generate"
     ) as load, patch.object(engine.ollama_client, "chat", return_value=iter([
-        {"message": {"content": "hello"}},
+        {"done": True, "message": {"content": "hello"}},
     ])) as chat:
         run_loop(engine, session, ["hi", "/context"])
         chat.assert_called_once()

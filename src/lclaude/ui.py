@@ -1,10 +1,12 @@
 """Terminal presentation and I/O handling for lclaude."""
 
+import json
 import re
 import sys
 from collections.abc import Callable, Generator, Iterable, Mapping
 from contextlib import contextmanager
 from datetime import datetime
+from typing import Any
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.application import Application
@@ -438,7 +440,7 @@ class InputReader:
             return None
 
 
-def render_conversation(messages: Iterable[Mapping[str, str]], *, chat_id: str) -> None:
+def render_conversation(messages: Iterable[Mapping[str, Any]], *, chat_id: str) -> None:
     """Replay saved dialogue into terminal scrollback without running inference."""
     interactive = sys.stdout.isatty()
     console = Console(file=sys.stdout) if interactive else None
@@ -446,9 +448,23 @@ def render_conversation(messages: Iterable[Mapping[str, str]], *, chat_id: str) 
         console.rule(f"Resumed chat {chat_id}")
     else:
         sys.stdout.write(f"\nResumed chat {chat_id}\n\n")
+    calls: dict[str, Any] = {}
     try:
         for message in messages:
             role = message["role"]
+            if role == "assistant" and message.get("tool_calls"):
+                calls = {c["id"]: c["arguments"] for c in message["tool_calls"]}
+                if not message["content"]:
+                    continue
+            if role == "tool":
+                try:
+                    result = json.loads(message["content"])
+                except ValueError:
+                    result = {}
+                truncated = isinstance(result, dict) and bool(result.get("truncated"))
+                print_tool_activity(message["name"], calls.get(message["tool_call_id"], {}),
+                                    message["status"], truncated)
+                continue
             if role not in ("user", "assistant"):
                 continue
             label = "You" if role == "user" else "Assistant"
@@ -493,6 +509,23 @@ def render_stream(token_stream: Iterable[str], *, context_text: str = "") -> str
         raise StreamAbortedError() from None
 
 
+def collect_stream(token_stream: Iterable[str], *, context_text: str = "") -> str:
+    """Keep an unverified artifact-based answer off screen while preserving activity."""
+    try:
+        if not sys.stdout.isatty():
+            return "".join(token_stream)
+        console = Console(file=sys.stdout, force_terminal=True)
+        with pinned_footer(console, context_text) as refresh_footer:
+            with console.status("Reading saved output…"):
+                content = []
+                for token in token_stream:
+                    content.append(token)
+                    refresh_footer()
+                return "".join(content)
+    except KeyboardInterrupt:
+        raise StreamAbortedError() from None
+
+
 def _render_terminal_stream(
     token_stream: Iterable[str], console: Console, refresh_footer: Callable[[], None],
 ) -> str:
@@ -528,6 +561,48 @@ def print_aborted() -> None:
     """Prints generation abort confirmation."""
     sys.stdout.write("\n[Generation aborted by user]\n")
     sys.stdout.flush()
+
+
+def print_tool_activity(name: str, arguments: Any, status: str, truncated: bool = False) -> None:
+    """Readable activity with relevant arguments, without JSON receipts or artifact IDs."""
+    def safe(value: Any, limit: int = 120) -> str:
+        text = json.dumps(str(value), ensure_ascii=True)[1:-1]
+        return text if len(text) <= limit else text[:limit - 3] + "..."
+
+    label = safe(name, 60)
+    details = "invalid arguments"
+    if isinstance(arguments, dict):
+        if name == "list_files":
+            details = safe(arguments.get("path", "."))
+            if arguments.get("glob") not in (None, "**/*"):
+                details += f" (pattern {safe(arguments['glob'], 40)})"
+        elif name == "read_file":
+            details = safe(arguments.get("path", ""))
+            if "start_line" in arguments or "end_line" in arguments:
+                details += (f", lines {safe(arguments.get('start_line', 1), 12)}"
+                            f" to {safe(arguments.get('end_line', 'end'), 12)}")
+        elif name == "search_text":
+            details = safe(arguments.get("query", ""))
+            if "glob" in arguments:
+                details += f" in {safe(arguments['glob'], 40)}"
+        elif name == "read_tool_output":
+            details = f"saved output from character {safe(arguments.get('start', 0), 12)}"
+        else:
+            details = "unknown tool"
+    state = {"success": "done", "error": "failed", "interrupted": "interrupted"}.get(status, status)
+    line = f"  {label}: {details} - {state}"
+    if truncated:
+        line += "; remaining output saved"
+    if sys.stdout.isatty():
+        Console(file=sys.stdout).print(line, style="dim", markup=False, highlight=False)
+    else:
+        sys.stdout.write(line + "\n")
+    sys.stdout.flush()
+
+
+def print_tool_resume() -> None:
+    sys.stdout.write("\nThe previous turn stopped after tool work. Completed results are saved. "
+                     "Incomplete calls are marked; no calls are repeated automatically.\n")
 
 
 def print_session_end() -> None:
@@ -619,6 +694,8 @@ def print_context(
         f"  Instructions   {marker}{count.instructions:,}\n"
         f"  Conversation   {marker}{count.conversation:,}\n"
         f"  Formatting     {marker}{count.overhead:,}\n"
+        + (f"  Tools          {marker}{count.tools:,}\n" if count.tools else "")
+        +
         f"  Total          {marker}{count.total:,}{capacity}\n"
         f"  Reply limit    {budget.response_tokens:,}\n"
     )
