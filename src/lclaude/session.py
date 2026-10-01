@@ -1,7 +1,9 @@
 """Session management for lclaude"""
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Literal
+from uuid import uuid4
 
 
 @dataclass
@@ -18,7 +20,19 @@ class Session:
 
     def __init__(self, system_prompt: str | None = None) -> None:
         self.system_prompt = system_prompt
+        self._new_identity()
         self._messages: list[Message] = []
+
+    def _new_identity(self) -> None:
+        """Refresh identity and timestamps so the next save records a new chat."""
+        self.session_id = str(uuid4())
+        self.created_at = datetime.now(timezone.utc).isoformat()
+        self.updated_at = self.created_at
+
+    @property
+    def conversation(self) -> list[dict[str, str]]:
+        """Full conversation, excluding the separately stored system prompt."""
+        return [message.to_dict() for message in self._messages]
 
     @property
     def messages(self) -> list[dict[str, str]]:
@@ -50,6 +64,7 @@ class Session:
 
     def clear(self) -> None:
         self._messages.clear()
+        self._new_identity()
 
     def get_preview(self, max_chars: int = 60) -> list[tuple[int, str, str]]:
         """Returns (index, role, truncated_content) for history inspection."""

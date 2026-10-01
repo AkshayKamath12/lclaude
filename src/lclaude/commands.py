@@ -9,6 +9,20 @@ from lclaude.session import Session
 
 
 @dataclass(frozen=True)
+class ClearConversation:
+    """Request application-coordinated conversation clearing."""
+
+
+@dataclass(frozen=True)
+class SelectChat:
+    """Request the saved-chat picker."""
+
+
+def _handle_chat(session: Session) -> SelectChat:
+    return SelectChat()
+
+
+@dataclass(frozen=True)
 class ShowContext:
     """Request application-coordinated context accounting."""
 
@@ -28,10 +42,8 @@ def _handle_model(session: Session) -> SelectModel:
     return SelectModel()
 
 
-def _handle_clear(session: Session) -> bool:
-    session.clear()
-    sys.stdout.write("\nCleared conversation history.\n")
-    return True
+def _handle_clear(session: Session) -> ClearConversation:
+    return ClearConversation()
 
 
 def _handle_history(session: Session) -> bool:
@@ -57,10 +69,13 @@ def _handle_exit(session: Session) -> bool:
 
 class Command(TypedDict):
     desc: str
-    handler: Callable[[Session], bool | SelectModel | ShowContext]
+    handler: Callable[
+        [Session], bool | SelectModel | ShowContext | SelectChat | ClearConversation
+    ]
 
 
 COMMANDS: dict[str, Command] = {
+    "/chat": {"desc": "Browse and resume project chats", "handler": _handle_chat},
     "/context": {"desc": "Show prompt budget and token usage", "handler": _handle_context},
     "/model": {
         "desc": "Select a model or /model <name>",
@@ -84,7 +99,9 @@ COMMANDS: dict[str, Command] = {
     },
 }
 
-def handle_slash_command(cmd: str, session: Session) -> bool | SelectModel | ShowContext:
+def handle_slash_command(
+    cmd: str, session: Session
+) -> bool | SelectModel | ShowContext | SelectChat | ClearConversation:
     """Main point of entry for slash command handling"""
     command = cmd.strip().lower()
 

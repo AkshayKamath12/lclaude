@@ -2,6 +2,7 @@
 
 import io
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -14,7 +15,12 @@ from lclaude.engine import (
     OllamaConnectionError,
     OllamaEngineError,
 )
+from lclaude.persistence import ChatStore
 from lclaude.session import Session
+
+
+def chat_store() -> ChatStore:
+    return ChatStore(Path.cwd())
 
 
 class TestCLISlashCommands(unittest.TestCase):
@@ -26,11 +32,11 @@ class TestCLISlashCommands(unittest.TestCase):
         session.add_message("assistant", "Hi there")
 
         with patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
-            handled = handle_slash_command("/clear", session)
+            action = handle_slash_command("/clear", session)
 
-            self.assertTrue(handled)
-            self.assertTrue(session.is_empty)
-            self.assertIn("Cleared", mock_stdout.getvalue())
+            self.assertEqual(action.__class__.__name__, "ClearConversation")
+            self.assertFalse(session.is_empty)
+            self.assertEqual(mock_stdout.getvalue(), "")
 
     def test_history_command_prints_turns(self) -> None:
         session = Session()
@@ -84,7 +90,7 @@ class TestCLIChatLoop(unittest.TestCase):
 
         with patch("lclaude.ui.InputReader.read", side_effect=["Hi", None]):
             with patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
-                run_chat_loop(self.mock_engine, [self.mock_engine.model])
+                run_chat_loop(self.mock_engine, [self.mock_engine.model], store=chat_store())
 
                 output = mock_stdout.getvalue()
                 self.assertIn("Assistant: Hello world!", output)
@@ -108,7 +114,7 @@ class TestCLIChatLoop(unittest.TestCase):
         with patch("lclaude.cli.Session.rollback") as mock_rollback:
             with patch("lclaude.ui.InputReader.read", side_effect=["Write code", None]):
                 with patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
-                    run_chat_loop(self.mock_engine, [self.mock_engine.model])
+                    run_chat_loop(self.mock_engine, [self.mock_engine.model], store=chat_store())
 
                     output = mock_stdout.getvalue()
                     self.assertIn("[Generation aborted by user]", output)
@@ -123,7 +129,7 @@ class TestCLIChatLoop(unittest.TestCase):
 
         with patch("lclaude.ui.InputReader.read", return_value=None):
             with patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
-                run_chat_loop(self.mock_engine, [self.mock_engine.model])
+                run_chat_loop(self.mock_engine, [self.mock_engine.model], store=chat_store())
 
                 mock_signal.assert_called_once_with(signal.SIGINT, signal.SIG_IGN)
                 self.assertIn("Session terminated by user.", mock_stdout.getvalue())
@@ -136,7 +142,9 @@ class TestCLIChatLoop(unittest.TestCase):
             with patch("lclaude.ui.InputReader.read", side_effect=["Ping", None]):
                 with patch("sys.stderr", new_callable=io.StringIO) as mock_stderr:
                     with patch("sys.stdout", new_callable=io.StringIO):
-                        run_chat_loop(self.mock_engine, [self.mock_engine.model])
+                        run_chat_loop(
+                            self.mock_engine, [self.mock_engine.model], store=chat_store()
+                        )
 
                         self.assertIn("[Connection Error]: Daemon dropped", mock_stderr.getvalue())
                         mock_rollback.assert_called_once()
@@ -146,7 +154,10 @@ class TestCLIMainStartup(unittest.TestCase):
     """Verifies startup lifecycle and engine pre-flight readiness checks."""
 
     def setUp(self) -> None:
-        loader = patch("lclaude.cli.load_system_prompt", return_value="Project guidance")
+        loader = patch(
+            "lclaude.cli.load_system_prompt",
+            return_value="Project guidance",
+        )
         loader.start()
         self.addCleanup(loader.stop)
 
@@ -177,9 +188,9 @@ class TestCLIMainStartup(unittest.TestCase):
             main()
 
             mock_instance.verify_ready.assert_called_once_with(allow_fallback=True)
-            mock_run_loop.assert_called_once_with(
-                mock_instance, ["model"], system_prompt="Project guidance"
-            )
+            mock_run_loop.assert_called_once()
+            assert mock_run_loop.call_args.args == (mock_instance, ["model"])
+            assert mock_run_loop.call_args.kwargs["session"].system_prompt == "Project guidance"
 
 
 @pytest.mark.parametrize("argv, installed, expected", [
@@ -247,7 +258,7 @@ def test_multiline_and_padded_commands_never_reach_inference(command):
         patch("sys.stdout", new_callable=io.StringIO) as output,
     ):
         reader_factory.return_value.read.side_effect = [" \n ", command, None]
-        run_chat_loop(engine, [engine.model])
+        run_chat_loop(engine, [engine.model], store=chat_store())
         reader_factory.assert_called_once_with(
             commands={name: info["desc"] for name, info in COMMANDS.items()}, models=[engine.model]
         )
@@ -286,7 +297,7 @@ def test_multiline_failed_turn_rolls_back_and_next_turn_succeeds(failure):
         patch("sys.stderr", new_callable=io.StringIO),
     ):
         reader_factory.return_value.read.side_effect = [failed_prompt, next_prompt, None]
-        run_chat_loop(engine, [engine.model])
+        run_chat_loop(engine, [engine.model], store=chat_store())
         reader_factory.assert_called_once_with(
             commands={name: info["desc"] for name, info in COMMANDS.items()}, models=[engine.model]
         )
@@ -315,7 +326,7 @@ def test_clear_reuses_input_reader_but_clears_conversation():
         patch("sys.stdout", new_callable=io.StringIO),
     ):
         reader_factory.return_value.read.side_effect = ["first", "/clear", "second", None]
-        run_chat_loop(engine, [engine.model])
+        run_chat_loop(engine, [engine.model], store=chat_store())
         reader_factory.assert_called_once_with(
             commands={name: info["desc"] for name, info in COMMANDS.items()}, models=[engine.model]
         )

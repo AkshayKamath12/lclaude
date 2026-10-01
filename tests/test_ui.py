@@ -349,3 +349,52 @@ def test_toolbar_row_visibility_tracks_runtime_allocation():
             assert not toolbar.filter()
             reader.set_context(PromptCount(1, 2, 3), 8192, ContextBudget())
             assert toolbar.filter()
+
+
+def test_replay_plain_text_preserves_full_messages_and_order(capsys):
+    from lclaude.ui import render_conversation
+
+    prompt = "  [bold]literal[/bold]\n    indented\n" + "x" * 1000
+    reply = "## Result\n```python\nprint('hello')\n```"
+    messages = [
+        {"role": "system", "content": "hidden guidance"},
+        {"role": "user", "content": prompt},
+        {"role": "assistant", "content": reply},
+        {"role": "user", "content": "follow up"},
+        {"role": "assistant", "content": "last answer"},
+    ]
+    with patch("lclaude.ui.render_stream", side_effect=AssertionError("no inference replay")):
+        render_conversation(messages, chat_id="saved-chat")
+    output = capsys.readouterr().out
+    assert output == (
+        f"\nResumed chat saved-chat\n\nYou:\n{prompt}\n\nAssistant:\n{reply}\n\n"
+        "You:\nfollow up\n\nAssistant:\nlast answer\n\n"
+    )
+
+
+def test_replay_terminal_uses_markdown_and_literal_user_text():
+    from rich.markdown import Markdown
+
+    from lclaude.ui import render_conversation
+
+    with patch("sys.stdout.isatty", return_value=True), patch("lclaude.ui.Console") as factory:
+        render_conversation([
+            {"role": "user", "content": "[bold]literal[/bold]\n  code"},
+            {"role": "assistant", "content": "```python\nprint(1)\n```"},
+        ], chat_id="chat")
+    calls = factory.return_value.print.call_args_list
+    assert calls[1].args == ("[bold]literal[/bold]\n  code",)
+    assert calls[1].kwargs == {"markup": False, "highlight": False}
+    assert isinstance(calls[3].args[0], Markdown)
+    assert "print(1)" in calls[3].args[0].markup
+
+
+def test_interrupted_transcript_render_returns_to_active_chat(capsys):
+    from lclaude.ui import render_conversation
+
+    def messages():
+        yield {"role": "user", "content": "first"}
+        raise KeyboardInterrupt()
+
+    render_conversation(messages(), chat_id="chat")
+    assert "Chat is still active" in capsys.readouterr().out
