@@ -47,7 +47,7 @@ are not searched. A missing or blank file uses a small default assistant prompt;
 an unreadable file or invalid UTF-8 stops startup with an error.
 
 Instructions stay loaded through `/clear` and model changes. Restart lclaude
-after editing the file. This also applies with redirected input. Files are loaded
+to start a new chat after editing the file. This also applies with redirected input. Files are loaded
 in full; context estimates are advisory and never prevent generation.
 
 ## Writing prompts
@@ -69,7 +69,7 @@ in full; context estimates are advisory and never prevent generation.
 Interactive prompts retain their whitespace. Input history holds whole submitted
 prompts and slash commands in memory for the current process, including prompts
 whose generation failed or was interrupted. Consecutive duplicates share one
-history entry. Nothing is saved to disk. `/clear` clears conversation context,
+history entry. Input recall history is not saved to disk. `/clear` clears conversation context,
 not input recall history; `/history` displays conversation context.
 
 **Ctrl+C** at the prompt discards the draft and exits. During generation it aborts
@@ -112,3 +112,58 @@ comparison with the estimate for that completed request.
 
 The reply limit defaults to 2,048 tokens and is passed as `num_predict`. Neither
 the estimate nor an unknown context size prevents a response.
+
+
+## Saved chats and resume
+
+Completed turns are saved automatically under
+`~/.local_claude/chats/<project-hash>/<session-UUID>.json`. The project hash is
+SHA-256 of the resolved absolute launch-directory path; separate launch directories
+have separate catalogs, even if they share a directory name. Each new session gets
+a UUID4. Files use schema version 1 and contain the project path, timestamps with
+timezones, selected model, and full messages. Project instructions are not stored.
+No token estimates, display state, or shortened messages are stored.
+
+Use `/chat` inside lclaude to browse saved chats for the current project, ordered
+from most recently updated to least recently updated. The scrollable picker shows
+each chat's local date and time (with AM/PM) and first-message preview, and marks
+the current chat. **Up/Down** move between chats, **Page Up/Page Down** move ten
+rows, **Enter** resumes the highlighted chat, and **Escape**, **Ctrl+C**, or
+**Ctrl+D** cancel. With redirected input, `/chat` prints the list without consuming
+another line of input; selection requires an interactive terminal.
+
+Resuming restores the saved model (which must still be installed) and uses the
+**current instructions loaded at launch**. Earlier draft files containing `system_prompt` remain readable; that field is
+ignored and removed on the next save. Restarting
+lclaude loads the current project file for both new and resumed chats. Changes
+made while lclaude is running take effect on the next launch.
+The saved conversation is rendered before the next prompt, with user messages and
+Markdown assistant responses available in terminal scrollback. Use `/model` after
+resuming to change models.
+If the selected chat cannot be read or its model is unavailable, the current chat
+remains active. The current chat is saved before switching; a save failure is silent
+and does not block the switch.
+
+`/clear` preserves instructions and the selected model and starts a fresh chat with
+a new UUID. The original chat remains available in `/chat`. The new chat is saved
+only after its first completed user/assistant turn; empty chats and interrupted
+first turns create no files. Changing models in an empty chat also creates no file.
+`/clear` starts a new chat even if saving the old chat fails.
+Launching lclaude automatically resumes the most recently updated saved chat for
+the launch directory and displays its transcript. If no valid saved chat exists,
+it starts fresh. Invalid files are reported and skipped. The saved model is used
+unless `--model` explicitly overrides it; an unavailable model produces a startup
+error rather than silently switching models. Use `/chat` to open another chat.
+Because empty chats are not saved, exiting immediately after `/clear` reopens
+the most recent saved chat on the next launch. Complete a turn in the new chat
+to make it the most recent saved conversation.
+Browsing or clearing an unchanged chat does not update its saved activity time.
+
+Failed or interrupted generation does not save the pending turn. Each save writes
+a temporary file beside the destination, flushes and fsyncs it, then atomically
+replaces the JSON file. A write failure is silent; the in-memory conversation
+remains usable and a later successful save includes it.
+Unsaved changes are lost on exit. Malformed or unsupported files are reported and
+never intentionally overwritten. Chats are plain local JSON, so their full text
+remains on disk after `/clear`. Avoid resuming the same UUID in multiple processes;
+concurrent writers are not merged or locked in this initial implementation.

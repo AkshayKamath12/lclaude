@@ -76,9 +76,9 @@ def test_startup_loads_launch_directory(tmp_path, monkeypatch, content):
     ):
         engine.return_value.verify_ready.return_value = ["model"]
         main()
-    loop.assert_called_once_with(
-        engine.return_value, ["model"], system_prompt=content or DEFAULT_SYSTEM_PROMPT
-    )
+    loop.assert_called_once()
+    assert loop.call_args.args == (engine.return_value, ["model"])
+    assert loop.call_args.kwargs["session"].system_prompt == (content or DEFAULT_SYSTEM_PROMPT)
 
 
 def test_startup_read_error_prevents_engine_and_input(tmp_path, monkeypatch, capsys):

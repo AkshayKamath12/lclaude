@@ -1,5 +1,6 @@
 """Model selection across command, provider, terminal, and application boundaries."""
 
+from pathlib import Path
 from unittest.mock import patch
 
 import httpx
@@ -12,6 +13,7 @@ from lclaude import ui
 from lclaude.cli import run_chat_loop
 from lclaude.commands import SelectModel, handle_slash_command
 from lclaude.engine import InferenceEngine, ModelNotFoundError, OllamaEngineError
+from lclaude.persistence import ChatStore
 from lclaude.session import Session
 
 
@@ -144,7 +146,7 @@ def test_loop_preserves_history_and_continues(command, selection, failure):
         ])) as chat,
         patch("signal.signal"),
     ):
-        run_chat_loop(engine, ["old", "new"])
+        run_chat_loop(engine, ["old", "new"], store=ChatStore(Path.cwd()))
     switched = failure is None and (selection is not None or command == "/model new")
     assert engine.model == ("new" if switched else "old")
     assert chat.call_args.kwargs["model"] == engine.model

@@ -4,6 +4,7 @@ import re
 import sys
 from collections.abc import Callable, Generator, Iterable, Mapping
 from contextlib import contextmanager
+from datetime import datetime
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.application import Application
@@ -18,7 +19,7 @@ from prompt_toolkit.input import Input
 from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import Layout
-from prompt_toolkit.layout.containers import Window
+from prompt_toolkit.layout.containers import HSplit, Window
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.output import Output
 from prompt_toolkit.styles import Style
@@ -90,6 +91,95 @@ def choose_model(
     )
     application: Application[str | None] = Application(
         layout=Layout(Window(control, always_hide_cursor=True)),
+        key_bindings=bindings, input=input_stream, output=output_stream,
+        full_screen=False, erase_when_done=True,
+    )
+    try:
+        return application.run()
+    except (KeyboardInterrupt, EOFError):
+        return None
+
+
+def format_chat_date(timestamp: str) -> str:
+    """Display a saved timestamp in local time, without seconds or leading zeroes."""
+    local = datetime.fromisoformat(timestamp).astimezone()
+    hour = local.hour % 12 or 12
+    period = "AM" if local.hour < 12 else "PM"
+    return f"{local:%b} {local.day}, {local.year} · {hour}:{local.minute:02d} {period}"
+
+
+def choose_chat(
+    chats: list[tuple[str, str]], current: str, *,
+    input_stream: Input | None = None, output_stream: Output | None = None,
+) -> str | None:
+    """Browse chats in supplied recency order with a bounded, scrollable viewport."""
+    if not chats:
+        sys.stdout.write("\nNo saved chats for this project.\n")
+        return None
+    interactive = input_stream is not None or output_stream is not None or (
+        sys.stdin.isatty() and sys.stdout.isatty()
+    )
+    if not interactive:
+        sys.stdout.write("\nSaved chats (open /chat in an interactive terminal to resume):\n")
+        for chat_id, label in chats:
+            sys.stdout.write(f"  {label}{' (current)' if chat_id == current else ''}\n")
+        return None
+
+    selected = 0
+    bindings = KeyBindings()
+
+    @bindings.add("up")
+    def previous(event: KeyPressEvent) -> None:
+        nonlocal selected
+        selected = max(0, selected - 1)
+
+    @bindings.add("down")
+    def next_chat(event: KeyPressEvent) -> None:
+        nonlocal selected
+        selected = min(len(chats) - 1, selected + 1)
+
+    @bindings.add("pageup")
+    def previous_page(event: KeyPressEvent) -> None:
+        nonlocal selected
+        selected = max(0, selected - 10)
+
+    @bindings.add("pagedown")
+    def next_page(event: KeyPressEvent) -> None:
+        nonlocal selected
+        selected = min(len(chats) - 1, selected + 10)
+
+    @bindings.add("enter")
+    def accept(event: KeyPressEvent) -> None:
+        event.app.exit(result=chats[selected][0])
+
+    @bindings.add("escape")
+    @bindings.add("c-c")
+    @bindings.add("c-d")
+    @bindings.add("c-z")
+    def cancel(event: KeyPressEvent) -> None:
+        event.app.exit(result=None)
+
+    def content() -> FormattedText:
+        lines = []
+        for index, (chat_id, label) in enumerate(chats):
+            # Keep each chat on one row, including user-provided preview text.
+            label = "".join(char if char.isprintable() else " " for char in label)
+            line = f"{'>' if index == selected else ' '} {label}"
+            if chat_id == current:
+                line += " (current)"
+            lines.append(("reverse bold" if index == selected else "", line + "\n"))
+        return FormattedText(lines)
+
+    control = FormattedTextControl(
+        content, focusable=True, get_cursor_position=lambda: Point(x=0, y=selected),
+    )
+    header = Window(FormattedTextControl(
+        "↑/↓, PgUp/PgDn: scroll | Esc: cancel"
+    ), height=1)
+    application: Application[str | None] = Application(
+        layout=Layout(HSplit([
+            header, Window(control, height=min(10, len(chats)), always_hide_cursor=True),
+        ]), focused_element=control),
         key_bindings=bindings, input=input_stream, output=output_stream,
         full_screen=False, erase_when_done=True,
     )
@@ -346,6 +436,35 @@ class InputReader:
         except (KeyboardInterrupt, EOFError):
             self._pasted_blocks.clear()
             return None
+
+
+def render_conversation(messages: Iterable[Mapping[str, str]], *, chat_id: str) -> None:
+    """Replay saved dialogue into terminal scrollback without running inference."""
+    interactive = sys.stdout.isatty()
+    console = Console(file=sys.stdout) if interactive else None
+    if console is not None:
+        console.rule(f"Resumed chat {chat_id}")
+    else:
+        sys.stdout.write(f"\nResumed chat {chat_id}\n\n")
+    try:
+        for message in messages:
+            role = message["role"]
+            if role not in ("user", "assistant"):
+                continue
+            label = "You" if role == "user" else "Assistant"
+            content = message["content"]
+            if console is None:
+                sys.stdout.write(f"{label}:\n{content}\n\n")
+            elif role == "user":
+                console.print("You:", style="bold")
+                console.print(content, markup=False, highlight=False)
+                console.print()
+            else:
+                console.print(Markdown(f"**Assistant:**\n\n{content}"))
+                console.print()
+    except KeyboardInterrupt:
+        sys.stdout.write("\nTranscript display interrupted. Chat is still active.\n")
+    sys.stdout.flush()
 
 
 def render_stream(token_stream: Iterable[str], *, context_text: str = "") -> str:

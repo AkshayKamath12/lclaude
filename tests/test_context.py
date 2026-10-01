@@ -1,6 +1,7 @@
 """Budget boundaries and the real application/transport integration."""
 
 from math import ceil
+from pathlib import Path
 from unittest.mock import patch
 
 import httpx
@@ -13,6 +14,7 @@ from lclaude.commands import ShowContext, handle_slash_command
 from lclaude.context import ConservativeTokenCounter, ContextBudget, PromptCount
 from lclaude.engine import InferenceEngine, OllamaEngineError, Usage
 from lclaude.instructions import load_system_prompt
+from lclaude.persistence import ChatStore
 from lclaude.session import Session
 
 
@@ -113,7 +115,7 @@ def run_loop(engine, session, inputs):
     with patch("lclaude.cli.Session", return_value=session), patch(
         "lclaude.ui.InputReader.read", side_effect=[*inputs, None]
     ), patch("signal.signal"):
-        run_chat_loop(engine, ["old", "new"])
+        run_chat_loop(engine, ["old", "new"], store=ChatStore(Path.cwd()))
 
 
 @pytest.mark.parametrize("oversized", ["instructions", "paste"])

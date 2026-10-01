@@ -4,7 +4,7 @@ import io
 import unittest
 from unittest.mock import patch
 
-from lclaude.commands import COMMANDS, handle_slash_command
+from lclaude.commands import COMMANDS, ClearConversation, handle_slash_command
 from lclaude.session import Session
 
 
@@ -33,11 +33,11 @@ class TestSlashCommands(unittest.TestCase):
         self.session.add_message("assistant", "Hi there")
 
         with patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
-            handled = handle_slash_command("/clear", self.session)
+            action = handle_slash_command("/clear", self.session)
 
-            self.assertTrue(handled)
-            self.assertTrue(self.session.is_empty)
-            self.assertIn("Cleared conversation history.", mock_stdout.getvalue())
+            self.assertEqual(action, ClearConversation())
+            self.assertFalse(self.session.is_empty)
+            self.assertEqual(mock_stdout.getvalue(), "")
 
     def test_history_command_empty_session(self) -> None:
         with patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
