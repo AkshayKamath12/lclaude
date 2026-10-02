@@ -184,9 +184,7 @@ def run_agent_turn(
             try:
                 store.save(session, engine.model)
             except SessionStorageError:
-                # Retain ordinary chat retry behavior; command checkpoints are strict.
-                if any(m["role"] == "tool" for m in session.conversation):
-                    raise
+                pass
             return (engine.last_usage, count) if engine.last_usage is not None else None
 
         result_start = session.begin_tools(content, calls, engine.last_thinking)
