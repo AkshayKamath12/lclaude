@@ -141,12 +141,12 @@ Simply opening a chat does not rewrite it.
 ## Context budget
 
 Every inference iteration counts instructions, message content, thinking,
-tool-call arguments, results, tool definitions, and message overhead. The existing
-conservative estimate plus reserved reply tokens must fit the context allocation.
-The transcript is never compacted, summarized, or stripped of call/result pairs.
+tool-call arguments, results, tool definitions, and message overhead. The footer
+warns when the estimated prompt plus reserved reply exceeds the known context
+allocation. The warning is advisory: lclaude still sends the request. The model
+server may truncate it or return a context error. If allocation is unknown, no
+over-budget warning can be calculated.
 
-An oversized request stops with a clear error; recorded command activity remains
-saved. Increase `--num-ctx`, reduce `--max-response-tokens`, or start a fresh chat.
-If the runtime allocation is unknown, lclaude attempts to load the model and
-query it. If it remains unknown, set `--num-ctx` explicitly. Counts are estimates,
-not a model-specific tokenizer or a guarantee against server-side truncation.
+The transcript is never compacted, summarized, or stripped of call/result pairs.
+Counts are estimates, not a model-specific tokenizer or a guarantee against
+server-side truncation.

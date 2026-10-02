@@ -9,7 +9,7 @@ import pytest
 
 from lclaude import ui
 from lclaude.cli import parse_args, run_agent_turn, run_chat_loop
-from lclaude.context import ConservativeTokenCounter, ContextBudget, ContextBudgetError
+from lclaude.context import ConservativeTokenCounter, ContextBudget
 from lclaude.engine import InferenceEngine, OllamaEngineError
 from lclaude.persistence import ChatStore, SessionStorageError
 from lclaude.session import Session
@@ -216,15 +216,17 @@ def test_process_crash_retains_pending_and_never_reruns_on_resume(env, capsys):
     assert "Never automatically repeat" in restored.messages[-2]["content"]
 
 
-def test_budget_enforced_again_after_tool_result_and_preserves_checkpoint(env):
+def test_over_budget_followup_is_sent_and_tool_result_is_preserved(env):
     store, session, engine, reader = env
     initial = ConservativeTokenCounter().count(session.messages, TOOL_SCHEMAS).total
-    with patch.object(engine.ollama_client, "chat", return_value=response(calls=[call()])) as chat:
-        with patch("lclaude.ui.approve_command", return_value="rejected"):
-            with pytest.raises(ContextBudgetError, match="exceeds"):
-                run_agent_turn(engine, session, store, reader, initial + 2048,
-                               ContextBudget(), 10)
-    assert chat.call_count == 1
+    contexts = []
+    reader.set_context.side_effect = lambda count, limit, budget: contexts.append(
+        (count, limit, budget)
+    )
+    chat, _, _ = run(env, [response(calls=[call()]), response("done")],
+                     limit=initial + 2048, approval="rejected")
+    assert chat.call_count == 2
+    assert contexts[1][0].total + contexts[1][2].response_tokens > contexts[1][1]
     assert results(store.load(session.session_id)[0])[0]["status"] == "rejected"
 
 

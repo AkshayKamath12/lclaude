@@ -60,7 +60,7 @@ By default, lclaude uses the most recently saved chat's model. For a new chat it
 - At launch, lclaude loads `AGENTS.md` from the current directory, or `agents.md` if the uppercase file is absent. A blank or missing file uses a default prompt. Instructions are loaded again on the next launch.
 - Completed chats are stored as JSON under `~/.local_claude/chats/`, grouped by launch directory. Startup resumes the newest valid chat; `/clear` starts a fresh one.
 - In interactive mode, **Enter** submits and **Alt+Enter** inserts a newline. **Ctrl+C** exits at the prompt or aborts the current response. Redirected input is handled one line at a time.
-- The context footer estimates instructions, conversation, tool definitions, and reserved reply space. Every model request must fit the estimated budget. If it cannot fit, lclaude explains how to adjust the context and preserves recorded command activity; it never silently removes messages.
+- The context footer estimates instructions, conversation, tool definitions, and reserved reply space. If the estimate exceeds the allocation, it shows a warning and still sends the request. It never silently removes messages.
 
 ## Command tool
 

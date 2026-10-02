@@ -17,7 +17,6 @@ from lclaude.commands import (
 from lclaude.context import (
     ConservativeTokenCounter,
     ContextBudget,
-    ContextBudgetError,
     PromptCount,
     assemble_messages,
 )
@@ -164,7 +163,7 @@ def run_chat_loop(
         except (OllamaConnectionError, OllamaEngineError) as exc:
             active_session.rollback()
             ui.print_error("Connection Error", str(exc))
-        except (SessionStorageError, ContextBudgetError) as exc:
+        except SessionStorageError as exc:
             active_session.rollback()
             ui.print_error("Agent turn stopped", str(exc))
 
@@ -175,8 +174,6 @@ def run_agent_turn(
 ) -> tuple[Usage, PromptCount] | None:
     """Stream, approve, checkpoint, execute, checkpoint, then ask the model again."""
     for _ in range(max_iterations):
-        if limit is None:
-            limit = engine.context_limit(load=True)
         messages, count = assemble_messages(session.messages, TOOL_SCHEMAS, limit, budget)
         reader.set_context(count, limit, budget)
         stream = engine.stream_chat(messages, tools=TOOL_SCHEMAS)

@@ -619,14 +619,18 @@ def print_startup_error(message: str) -> None:
 
 
 def context_status(count: PromptCount, limit: int | None, budget: ContextBudget) -> str:
-    """No denominator or placeholder until a real allocation is known."""
+    """Show the current estimate and warn when it exceeds the context allocation."""
     if limit is None:
         return ""
     marker = "~" if count.estimated else ""
-    return (
+    status = (
         f"Prompt {marker}{count.total:,} / {limit:,} tokens | "
         f"{budget.response_tokens:,} reserved for reply"
     )
+    overflow = count.total + budget.response_tokens - limit
+    if overflow > 0:
+        status += f" | WARNING: ~{overflow:,} tokens over context budget"
+    return status
 
 
 @contextmanager

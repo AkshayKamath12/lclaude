@@ -14,7 +14,6 @@ from lclaude.commands import ShowContext, handle_slash_command
 from lclaude.context import (
     ConservativeTokenCounter,
     ContextBudget,
-    ContextBudgetError,
     PromptCount,
     assemble_messages,
 )
@@ -125,24 +124,23 @@ def run_loop(engine, session, inputs):
 
 
 @pytest.mark.parametrize("oversized", ["instructions", "paste"])
-def test_oversize_blocks_inference_and_preserves_history(oversized, capsys):
+def test_oversize_still_sends_inference_request(oversized):
     session = Session("x" * 60000 if oversized == "instructions" else "rules")
     session.add_message("user", "earlier")
     session.add_message("assistant", "answer")
-    before = session.messages
     prompt = "hello" if oversized == "instructions" else "x\n" * 30000
     engine = InferenceEngine(model="old", num_ctx=8192)
     with patch.object(engine.ollama_client, "chat", return_value=iter([
         {"done": True, "message": {"content": "hello back"}},
     ])) as chat:
         run_loop(engine, session, [prompt])
-        chat.assert_not_called()
-    assert session.messages == before
-    assert "exceeds" in capsys.readouterr().err
+    chat.assert_called_once()
+    assert chat.call_args.kwargs["messages"][-1]["content"] == prompt
+    assert session.conversation[-1] == {"role": "assistant", "content": "hello back"}
 
 
 @pytest.mark.parametrize("failure", [KeyboardInterrupt(), httpx.ConnectError("lost")])
-def test_discovery_failure_prevents_unbudgeted_request(failure):
+def test_context_discovery_failure_does_not_prevent_inference(failure):
     engine = InferenceEngine(model="old")
     session = Session("rules")
     with patch.object(engine.ollama_client, "ps", side_effect=failure), patch.object(
@@ -151,11 +149,11 @@ def test_discovery_failure_prevents_unbudgeted_request(failure):
         ])
     ) as chat:
         run_loop(engine, session, ["hello"])
-        chat.assert_not_called()
-    assert session.turn_count == 0
+        chat.assert_called_once()
+    assert session.turn_count == 1
 
 
-def test_unavailable_limit_attempts_load_then_explains_required_flag(capsys):
+def test_unavailable_limit_does_not_prevent_inference(capsys):
     engine = InferenceEngine(model="old")
     session = Session("rules")
     with patch.object(engine.ollama_client, "ps", return_value={"models": []}), patch.object(
@@ -164,12 +162,12 @@ def test_unavailable_limit_attempts_load_then_explains_required_flag(capsys):
         {"done": True, "message": {"content": "hello"}},
     ])) as chat:
         run_loop(engine, session, ["hi", "/context"])
-        chat.assert_not_called()
-        load.assert_called_once()
+        chat.assert_called_once()
+        load.assert_not_called()
     output = capsys.readouterr()
     assert "unavailable" not in output.out and "%" not in output.out
-    assert "--num-ctx" in output.err
-    assert session.turn_count == 0
+    assert not output.err
+    assert session.turn_count == 1
 
 
 def test_model_switch_refreshes_runtime_and_clears_reported_usage(capsys):
@@ -264,10 +262,23 @@ def test_budget_boundary_includes_arguments_results_thinking_and_tools():
     assert actual == count and payload == messages
     payload[1]["tool_calls"][0]["function"]["arguments"]["command"] = "mutated"
     assert messages[1]["tool_calls"][0]["function"]["arguments"]["command"] == "echo hi"
-    with pytest.raises(ContextBudgetError, match="exceeds"):
-        assemble_messages(messages, tools, count.total + 99, ContextBudget(100))
-    with pytest.raises(ContextBudgetError, match="--num-ctx"):
-        assemble_messages(messages, tools, None, ContextBudget(100))
+    oversized, over_count = assemble_messages(
+        messages, tools, count.total + 99, ContextBudget(100),
+    )
+    assert oversized == messages and over_count == count
+    unknown, unknown_count = assemble_messages(messages, tools, None, ContextBudget(100))
+    assert unknown == messages and unknown_count == count
+
+
+def test_context_footer_warns_when_prompt_and_reply_exceed_limit():
+    count = PromptCount(7000, 0, 0)
+    status = ui.context_status(count, 4096, ContextBudget(2048))
+    assert "WARNING" in status
+    assert "4,952 tokens over context budget" in status
+
+    under_limit = ui.context_status(PromptCount(1000, 0, 0), 4096, ContextBudget(2048))
+    assert "WARNING" not in under_limit
+    assert ui.context_status(count, None, ContextBudget(2048)) == ""
 
 
 def test_context_unknown_limit_and_missing_reported_counts(capsys):

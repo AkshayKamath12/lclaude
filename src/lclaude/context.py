@@ -64,26 +64,11 @@ class ContextBudget:
             raise ValueError("Reply tokens must be positive.")
 
 
-class ContextBudgetError(Exception):
-    """The next inference request cannot fit its context allocation."""
-
-
 def assemble_messages(
     messages: list[dict[str, Any]], tools: list[dict[str, Any]],
     limit: int | None, budget: ContextBudget,
 ) -> tuple[list[dict[str, Any]], PromptCount]:
-    """Count the complete request and enforce its budget without modifying history."""
+    """Build an inference copy and count it without rejecting oversized prompts."""
     payload = deepcopy(messages)
     count = ConservativeTokenCounter().count(payload, tools)
-    if limit is None:
-        raise ContextBudgetError(
-            "Cannot determine the model's context allocation. Set --num-ctx explicitly."
-        )
-    if count.total + budget.response_tokens > limit:
-        raise ContextBudgetError(
-            f"Estimated prompt ({count.total:,}) plus reply reserve "
-            f"({budget.response_tokens:,}) exceeds the {limit:,}-token context. "
-            "Increase --num-ctx, reduce --max-response-tokens, or start a new chat. "
-            "Recorded command activity is preserved."
-        )
     return payload, count
