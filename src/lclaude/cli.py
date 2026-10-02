@@ -159,7 +159,15 @@ def run_agent_turn(
     engine: InferenceEngine, session: Session, store: ChatStore, reader: ui.InputReader,
     limit: int | None, budget: ContextBudget, max_iterations: int,
 ) -> tuple[Usage, PromptCount] | None:
-    """Stream, approve, checkpoint, execute, checkpoint, then ask the model again."""
+    """Run a user turn through model responses and any requested commands.
+
+    Each iteration sends the current conversation and tool schema to Ollama.
+    Responses with tool calls are saved. Each call is validated in order; valid
+    commands are shown for approval, and approved commands are checkpointed before
+    execution. Bounded results are saved before asking the model again. The loop
+    ends with a final response, cancellation, or the iteration limit. A final
+    response returns its usage and prompt estimate.
+    """
     counter = ConservativeTokenCounter()
     for _ in range(max_iterations):
         messages = session.messages
