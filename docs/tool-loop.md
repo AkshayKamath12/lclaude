@@ -22,6 +22,12 @@ There is no separate tool ledger or generic dispatch framework.
 | `cwd` | Existing directory, relative to the launch directory or absolute. Default: `.`. |
 | `timeout_seconds` | Integer from 1 to 300. Default: 60. Separate from the Ollama socket timeout. |
 
+The tool definition tells the model to emit a structured call in the same response
+when asked to run a command. A code block or a statement such as “I'll run this”
+does not execute anything; only a matching saved tool result is evidence that a
+command ran. Each call starts a new shell process. A `cd` inside one call does not
+carry over; pass the desired `cwd` on every call.
+
 On Windows, commands run through Windows PowerShell
 (`System32/WindowsPowerShell/v1.0/powershell.exe`) with no profile and noninteractive
 input. On Linux/macOS, commands run through `/bin/sh -c`. Bash and PowerShell syntax

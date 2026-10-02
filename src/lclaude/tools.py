@@ -17,7 +17,12 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [{
         "name": "run_command",
         "description": (
             f"Run a command using {SHELL}, after user approval. "
-            "The working directory is not a sandbox. Output is bounded and may be truncated."
+            "When the user asks you to run a command, emit this structured tool call "
+            "in the same response; a code block or saying you will run it does not run it. "
+            "Only report execution after reading a tool result. Each call starts a fresh "
+            "shell, so changing directories does not persist; set cwd on each call. "
+            "Use syntax for the specified shell. The working directory is not a sandbox. "
+            "Output is bounded and may be truncated."
         ),
         "parameters": {
             "type": "object", "additionalProperties": False,

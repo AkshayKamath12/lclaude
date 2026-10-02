@@ -8,13 +8,28 @@ from unittest.mock import patch
 import pytest
 
 from lclaude import ui
-from lclaude.tools import OUTPUT_BYTES, SHELL, ToolError, run_command, validate_command
+from lclaude.tools import (
+    OUTPUT_BYTES,
+    SHELL,
+    TOOL_SCHEMAS,
+    ToolError,
+    run_command,
+    validate_command,
+)
 
 
 def request(tmp_path, command, **kwargs):
     return validate_command(tmp_path, "run_command", {
         "command": command, "shell": SHELL, **kwargs,
     })
+
+
+def test_tool_definition_explains_execution_and_per_call_directory():
+    description = TOOL_SCHEMAS[0]["function"]["description"]
+    assert "emit this structured tool call" in description
+    assert "a code block or saying you will run it does not run it" in description
+    assert "Each call starts a fresh shell" in description
+    assert "set cwd on each call" in description
 
 
 @pytest.mark.parametrize("arguments", [
