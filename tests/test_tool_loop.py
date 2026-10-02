@@ -279,28 +279,3 @@ def test_aborted_render_closes_sdk_stream_and_never_persists_partial_message(env
     approval.assert_not_called()
     assert store.list_sessions() == ([], [])
     assert session.conversation == [{"role": "user", "content": "inspect"}]
-
-
-def test_unsaved_result_blocks_next_user_request_until_checkpoint_succeeds(env, capsys):
-    store, session, engine, _ = env
-    session.rollback()
-    saves = 0
-    save = store.save
-    def fail_after_pending(chat, model):
-        nonlocal saves
-        saves += 1
-        if saves >= 3:
-            raise SessionStorageError("disk full")
-        save(chat, model)
-    with patch.object(store, "save", side_effect=fail_after_pending), patch(
-        "lclaude.ui.InputReader.read", side_effect=["first", "try again", None],
-    ), patch("signal.signal"), patch.object(
-        engine.ollama_client, "chat", return_value=response(calls=[call()]),
-    ) as chat, patch("lclaude.ui.approve_command", return_value="approved"), patch(
-        "lclaude.cli.run_command", return_value=command_result("success", "done"),
-    ):
-        run_chat_loop(engine, [engine.model], session=session, store=store)
-    assert chat.call_count == 1
-    assert results(session)[0]["status"] == "success"
-    assert results(store.load(session.session_id)[0])[0]["status"] == "pending"
-    assert capsys.readouterr().err.count("disk full") == 2

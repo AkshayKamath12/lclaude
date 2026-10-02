@@ -82,7 +82,9 @@ Before approval, the complete call bundle is saved with `not_started` placeholde
 After approval, the current call becomes `pending` and is durably saved **before**
 the subprocess starts. That record includes the resolved directory and shell.
 After execution, its placeholder is replaced by the bounded result and saved
-**before** another command or model request. A failed checkpoint stops the loop.
+**before** another command or model request. A failed checkpoint stops the current
+turn and reports an error; the in-memory conversation remains available, so a later
+user turn can continue even if the failed checkpoint has not reached disk.
 
 - `not_started`: execution was not started by the application.
 - `pending`: execution may have started or finished, but no completed outcome was saved.

@@ -139,14 +139,6 @@ def run_chat_loop(
                 last_completed_usage = None
             continue
 
-        # A prior result may still be only in memory after a failed checkpoint.
-        # Flush it before accepting another request, while the transcript is saveable.
-        if any(m["role"] == "tool" for m in active_session.conversation):
-            try:
-                store.save(active_session, engine.model)
-            except SessionStorageError as exc:
-                ui.print_error("Agent turn stopped", str(exc))
-                continue
         active_session.add_message("user", user_input)
         try:
             last_completed_usage = run_agent_turn(
