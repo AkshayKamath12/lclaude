@@ -2,7 +2,6 @@
 
 from collections.abc import Generator
 from contextlib import contextmanager
-from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
@@ -170,9 +169,9 @@ class InferenceEngine:
                     if message.get("thinking"):
                         thinking.append(message["thinking"])
                     for call in message.get("tool_calls") or []:
-                        item = call.model_dump(exclude_none=True) if hasattr(
-                            call, "model_dump"
-                        ) else deepcopy(call)
+                        item = call if isinstance(call, dict) else call.model_dump(
+                            exclude_none=True
+                        )
                         if not isinstance(item, dict):
                             raise OllamaEngineError("Malformed structured tool call")
                         function = item.get("function")
