@@ -559,19 +559,20 @@ def _safe_tool_text(value: Any) -> str:
 
 def approve_command(command: Command) -> str:
     """Show the complete request and require explicit interactive approval."""
+    shell = "PowerShell" if command.shell == "powershell" else command.shell
     sys.stdout.write(
-        f"\nrun_command\n  Shell: {command.shell}\n"
-        f"  Directory: {_safe_tool_text(command.cwd)}\n"
-        f"  Timeout: {command.timeout_seconds}s\n"
-        f"  Command: {_safe_tool_text(command.command)}\n"
-        "  Runs with your permissions; the directory is not a sandbox.\n"
+        f"\n┌─ run_command · {shell} · {command.timeout_seconds}s\n"
+        f"│ {_safe_tool_text(command.cwd)}\n"
+        f"│ {_safe_tool_text(command.command)}\n"
+        "│ Runs with your permissions; not sandboxed.\n"
+        "└─ "
     )
     sys.stdout.flush()
     if not sys.stdin.isatty():
         sys.stdout.write("Command rejected: approval requires interactive input.\n")
         return "rejected"
     try:
-        return "approved" if input("Run this command? [y/N] ").strip().lower() in (
+        return "approved" if input("Run? [y/N] ").strip().lower() in (
             "y", "yes",
         ) else "rejected"
     except EOFError:
@@ -585,9 +586,13 @@ def print_tool_activity(name: str, arguments: Any, status: str, truncated: bool 
     text = _safe_tool_text(details)
     if len(text) > 120:
         text = text[:117] + "..."
-    line = f"  {_safe_tool_text(name)}: {text} - {status}"
+    if status == "running":
+        line = f"  ▶ {text}"
+    else:
+        marker = "✓" if status == "success" else "✗"
+        line = f"  {marker} {_safe_tool_text(name)} · {status}"
     if truncated:
-        line += "; output truncated (omitted output not saved)"
+        line += " · output truncated"
     sys.stdout.write(line + "\n")
     sys.stdout.flush()
 

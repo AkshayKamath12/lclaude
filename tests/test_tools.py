@@ -159,12 +159,20 @@ def test_approval_shows_entire_request_before_prompt(tmp_path, answer, expected,
         visible = capsys.readouterr().out
         assert command.command in visible
         assert str(tmp_path) in visible
-        assert command.shell in visible and "not a sandbox" in visible
+        assert command.shell.lower() in visible.lower() and "not sandboxed" in visible
         return answer
     with patch.object(sys.stdin, "isatty", return_value=True), patch(
         "builtins.input", side_effect=approve
     ):
         assert ui.approve_command(command) == expected
+
+
+def test_tool_activity_is_compact_and_marks_truncated_output(capsys):
+    ui.print_tool_activity("run_command", {"command": "ls"}, "running")
+    ui.print_tool_activity("run_command", {"command": "ls"}, "success", truncated=True)
+    assert capsys.readouterr().out == (
+        "  ▶ ls\n  ✓ run_command · success · output truncated\n"
+    )
 
 
 @pytest.mark.parametrize("failure,expected", [(EOFError(), "rejected"),
