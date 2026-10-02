@@ -3,6 +3,7 @@
 import io
 import subprocess
 import sys
+import time
 from unittest.mock import patch
 
 import pytest
@@ -104,7 +105,17 @@ def test_timeout(tmp_path):
 
 def test_cancellation_stops_spawned_process(tmp_path):
     command = "Start-Sleep -Seconds 10" if SHELL == "powershell" else "sleep 10"
-    with patch("lclaude.tools.time.sleep", side_effect=KeyboardInterrupt):
+    real_sleep = time.sleep
+    interrupted = False
+
+    def interrupt_once(seconds):
+        nonlocal interrupted
+        if not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt
+        real_sleep(seconds)
+
+    with patch("lclaude.tools.time.sleep", side_effect=interrupt_once):
         result = run_command(request(tmp_path, command))
     assert result["status"] == "cancelled"
     assert result["exit_code"] is not None
