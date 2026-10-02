@@ -15,7 +15,6 @@ from lclaude.context import (
     ConservativeTokenCounter,
     ContextBudget,
     PromptCount,
-    assemble_messages,
 )
 from lclaude.engine import InferenceEngine, OllamaEngineError, Usage
 from lclaude.instructions import load_system_prompt
@@ -258,16 +257,6 @@ def test_budget_boundary_includes_arguments_results_thinking_and_tools():
     assert count.tools > 0
     assert count.total > counter.count([{"role": m["role"], "content": m["content"]}
                                         for m in messages]).total
-    payload, actual = assemble_messages(messages, tools, count.total + 100, ContextBudget(100))
-    assert actual == count and payload == messages
-    payload[1]["tool_calls"][0]["function"]["arguments"]["command"] = "mutated"
-    assert messages[1]["tool_calls"][0]["function"]["arguments"]["command"] == "echo hi"
-    oversized, over_count = assemble_messages(
-        messages, tools, count.total + 99, ContextBudget(100),
-    )
-    assert oversized == messages and over_count == count
-    unknown, unknown_count = assemble_messages(messages, tools, None, ContextBudget(100))
-    assert unknown == messages and unknown_count == count
 
 
 def test_context_footer_warns_when_prompt_and_reply_exceed_limit():

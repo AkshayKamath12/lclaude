@@ -14,12 +14,7 @@ from lclaude.commands import (
     ShowContext,
     handle_slash_command,
 )
-from lclaude.context import (
-    ConservativeTokenCounter,
-    ContextBudget,
-    PromptCount,
-    assemble_messages,
-)
+from lclaude.context import ConservativeTokenCounter, ContextBudget, PromptCount
 from lclaude.engine import (
     InferenceEngine,
     ModelNotFoundError,
@@ -173,8 +168,10 @@ def run_agent_turn(
     limit: int | None, budget: ContextBudget, max_iterations: int,
 ) -> tuple[Usage, PromptCount] | None:
     """Stream, approve, checkpoint, execute, checkpoint, then ask the model again."""
+    counter = ConservativeTokenCounter()
     for _ in range(max_iterations):
-        messages, count = assemble_messages(session.messages, TOOL_SCHEMAS, limit, budget)
+        messages = session.messages
+        count = counter.count(messages, TOOL_SCHEMAS)
         reader.set_context(count, limit, budget)
         stream = engine.stream_chat(messages, tools=TOOL_SCHEMAS)
         try:

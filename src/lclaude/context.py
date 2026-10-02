@@ -2,7 +2,6 @@
 
 import json
 from collections.abc import Mapping, Sequence
-from copy import deepcopy
 from dataclasses import dataclass
 from math import ceil
 from typing import Any, Protocol
@@ -62,13 +61,3 @@ class ContextBudget:
     def __post_init__(self) -> None:
         if self.response_tokens <= 0:
             raise ValueError("Reply tokens must be positive.")
-
-
-def assemble_messages(
-    messages: list[dict[str, Any]], tools: list[dict[str, Any]],
-    limit: int | None, budget: ContextBudget,
-) -> tuple[list[dict[str, Any]], PromptCount]:
-    """Build an inference copy and count it without rejecting oversized prompts."""
-    payload = deepcopy(messages)
-    count = ConservativeTokenCounter().count(payload, tools)
-    return payload, count
