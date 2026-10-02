@@ -88,7 +88,7 @@ class TestCLIChatLoop(unittest.TestCase):
 
     def test_normal_chat_turn_records_history(self) -> None:
         """Simulates a prompt submission followed by an EOF exit."""
-        self.mock_engine.stream_chat.return_value = iter(["Hello", " world", "!"])
+        self.mock_engine.stream_chat.return_value = (token for token in ["Hello", " world", "!"])
 
         with patch("lclaude.ui.InputReader.read", side_effect=["Hi", None]):
             with patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
@@ -294,7 +294,7 @@ def test_multiline_failed_turn_rolls_back_and_next_turn_succeeds(failure):
         yield "partial output"
         raise failure
 
-    engine.stream_chat.side_effect = [fail_stream(), iter(["complete"])]
+    engine.stream_chat.side_effect = [fail_stream(), (token for token in ["complete"])]
     with (
         patch("lclaude.ui.InputReader") as reader_factory,
         patch("lclaude.cli.Session", return_value=session),
@@ -327,7 +327,9 @@ def test_clear_reuses_input_reader_but_clears_conversation():
     engine.last_usage = None
     engine.last_tool_calls = []
     engine.last_thinking = ""
-    engine.stream_chat.side_effect = [iter(["one"]), iter(["two"])]
+    engine.stream_chat.side_effect = [
+        (token for token in ["one"]), (token for token in ["two"]),
+    ]
     with (
         patch("lclaude.ui.InputReader") as reader_factory,
         patch("signal.signal"),
