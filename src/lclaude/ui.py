@@ -593,6 +593,7 @@ def print_tool_activity(name: str, arguments: Any, status: str, truncated: bool 
 
 
 def print_tool_resume() -> None:
+    """Explain how interrupted tool work is represented when resuming a chat."""
     sys.stdout.write(
         "\nThe previous turn stopped after tool work. Completed results are saved. "
         "Pending commands have an unknown outcome; not_started commands were not executed. "
