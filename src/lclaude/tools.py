@@ -123,7 +123,8 @@ def run_command(command: Command) -> dict[str, Any]:
             argv, cwd=command.cwd, stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             start_new_session=sys.platform != "win32",
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
+            creationflags=(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                           if sys.platform == "win32" else 0),
         )
     except OSError as exc:
         return command_result("error", f"Could not start command: {exc}")
