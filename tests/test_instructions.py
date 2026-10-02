@@ -120,7 +120,7 @@ def test_loaded_prompt_survives_turns_clear_model_change_and_interrupt(
 
     with (
         patch("sys.argv", ["lclaude", "--model", "old"]),
-        patch("lclaude.engine.OllamaTransport") as client,
+        patch("lclaude.engine.ollama.Client") as client,
         patch("builtins.input", side_effect=read_redirected_input),
         patch("sys.stdin.isatty", return_value=False),
         patch("sys.stdout.isatty", return_value=False),

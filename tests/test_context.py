@@ -11,7 +11,13 @@ import pytest
 from lclaude import ui
 from lclaude.cli import parse_args, run_chat_loop
 from lclaude.commands import ShowContext, handle_slash_command
-from lclaude.context import ConservativeTokenCounter, ContextBudget, PromptCount
+from lclaude.context import (
+    ConservativeTokenCounter,
+    ContextBudget,
+    ContextBudgetError,
+    PromptCount,
+    assemble_messages,
+)
 from lclaude.engine import InferenceEngine, OllamaEngineError, Usage
 from lclaude.instructions import load_system_prompt
 from lclaude.persistence import ChatStore
@@ -119,7 +125,7 @@ def run_loop(engine, session, inputs):
 
 
 @pytest.mark.parametrize("oversized", ["instructions", "paste"])
-def test_oversize_never_blocks_inference(oversized, capsys):
+def test_oversize_blocks_inference_and_preserves_history(oversized, capsys):
     session = Session("x" * 60000 if oversized == "instructions" else "rules")
     session.add_message("user", "earlier")
     session.add_message("assistant", "answer")
@@ -130,15 +136,13 @@ def test_oversize_never_blocks_inference(oversized, capsys):
         {"done": True, "message": {"content": "hello back"}},
     ])) as chat:
         run_loop(engine, session, [prompt])
-        chat.assert_called_once()
-    assert session.messages == before + [
-        {"role": "user", "content": prompt}, {"role": "assistant", "content": "hello back"},
-    ]
-    assert not capsys.readouterr().err
+        chat.assert_not_called()
+    assert session.messages == before
+    assert "exceeds" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("failure", [KeyboardInterrupt(), httpx.ConnectError("lost")])
-def test_discovery_failure_does_not_block_response(failure):
+def test_discovery_failure_prevents_unbudgeted_request(failure):
     engine = InferenceEngine(model="old")
     session = Session("rules")
     with patch.object(engine.ollama_client, "ps", side_effect=failure), patch.object(
@@ -147,11 +151,11 @@ def test_discovery_failure_does_not_block_response(failure):
         ])
     ) as chat:
         run_loop(engine, session, ["hello"])
-        chat.assert_called_once()
-    assert session.turn_count == 1
+        chat.assert_not_called()
+    assert session.turn_count == 0
 
 
-def test_unavailable_limit_is_silent_and_never_loads_or_blocks(capsys):
+def test_unavailable_limit_attempts_load_then_explains_required_flag(capsys):
     engine = InferenceEngine(model="old")
     session = Session("rules")
     with patch.object(engine.ollama_client, "ps", return_value={"models": []}), patch.object(
@@ -160,12 +164,12 @@ def test_unavailable_limit_is_silent_and_never_loads_or_blocks(capsys):
         {"done": True, "message": {"content": "hello"}},
     ])) as chat:
         run_loop(engine, session, ["hi", "/context"])
-        chat.assert_called_once()
-        load.assert_not_called()
+        chat.assert_not_called()
+        load.assert_called_once()
     output = capsys.readouterr()
     assert "unavailable" not in output.out and "%" not in output.out
-    assert not output.err
-    assert session.turn_count == 1
+    assert "--num-ctx" in output.err
+    assert session.turn_count == 0
 
 
 def test_model_switch_refreshes_runtime_and_clears_reported_usage(capsys):
@@ -240,6 +244,30 @@ def test_runtime_allocation_is_not_cached():
     ]):
         assert engine.context_limit() == 8192
         assert engine.context_limit(load=True) == 4096
+
+
+def test_budget_boundary_includes_arguments_results_thinking_and_tools():
+    messages = [
+        {"role": "user", "content": "inspect"},
+        {"role": "assistant", "content": "", "thinking": "considering",
+         "tool_calls": [{"function": {"name": "run_command",
+                                     "arguments": {"command": "echo hi"}}}]},
+        {"role": "tool", "tool_name": "run_command", "content": "bounded result"},
+    ]
+    tools = [{"type": "function", "function": {"name": "run_command"}}]
+    counter = ConservativeTokenCounter()
+    count = counter.count(messages, tools)
+    assert count.tools > 0
+    assert count.total > counter.count([{"role": m["role"], "content": m["content"]}
+                                        for m in messages]).total
+    payload, actual = assemble_messages(messages, tools, count.total + 100, ContextBudget(100))
+    assert actual == count and payload == messages
+    payload[1]["tool_calls"][0]["function"]["arguments"]["command"] = "mutated"
+    assert messages[1]["tool_calls"][0]["function"]["arguments"]["command"] == "echo hi"
+    with pytest.raises(ContextBudgetError, match="exceeds"):
+        assemble_messages(messages, tools, count.total + 99, ContextBudget(100))
+    with pytest.raises(ContextBudgetError, match="--num-ctx"):
+        assemble_messages(messages, tools, None, ContextBudget(100))
 
 
 def test_context_unknown_limit_and_missing_reported_counts(capsys):

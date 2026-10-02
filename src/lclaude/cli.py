@@ -1,12 +1,9 @@
 """Command Line Interface (REPL) for lclaude."""
 
 import argparse
-import json
 import signal
 import sys
 from pathlib import Path
-from typing import Any
-from uuid import UUID, uuid5
 
 from lclaude import ui
 from lclaude.commands import (
@@ -20,9 +17,9 @@ from lclaude.commands import (
 from lclaude.context import (
     ConservativeTokenCounter,
     ContextBudget,
+    ContextBudgetError,
     PromptCount,
     assemble_messages,
-    pending_artifacts,
 )
 from lclaude.engine import (
     InferenceEngine,
@@ -34,7 +31,7 @@ from lclaude.engine import (
 from lclaude.instructions import InstructionLoadError, load_system_prompt
 from lclaude.persistence import ChatStore, SessionStorageError
 from lclaude.session import Session
-from lclaude.tools import TOOL_SCHEMAS, ToolError, ToolOutput, dispatch
+from lclaude.tools import TOOL_SCHEMAS, ToolError, command_result, run_command, validate_command
 
 
 def run_chat_loop(
@@ -148,6 +145,14 @@ def run_chat_loop(
                 last_completed_usage = None
             continue
 
+        # A prior result may still be only in memory after a failed checkpoint.
+        # Flush it before accepting another request, while the transcript is saveable.
+        if any(m["role"] == "tool" for m in active_session.conversation):
+            try:
+                store.save(active_session, engine.model)
+            except SessionStorageError as exc:
+                ui.print_error("Agent turn stopped", str(exc))
+                continue
         active_session.add_message("user", user_input)
         try:
             last_completed_usage = run_agent_turn(
@@ -159,104 +164,72 @@ def run_chat_loop(
         except (OllamaConnectionError, OllamaEngineError) as exc:
             active_session.rollback()
             ui.print_error("Connection Error", str(exc))
-        except SessionStorageError as exc:
+        except (SessionStorageError, ContextBudgetError) as exc:
             active_session.rollback()
             ui.print_error("Agent turn stopped", str(exc))
-
-
-def _calls(session: Session, raw_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    calls = []
-    ids: set[str] = set()
-    for index, raw in enumerate(raw_calls):
-        function = raw.get("function")
-        if not isinstance(function, dict) or not isinstance(function.get("name"), str):
-            raise OllamaEngineError("Malformed structured tool call")
-        call_id = raw.get("id")
-        if call_id is None:
-            call_id = str(uuid5(UUID(session.session_id), f"{len(session.conversation)}:{index}"))
-        if not isinstance(call_id, str) or not call_id or call_id in ids:
-            raise OllamaEngineError("Invalid or duplicate tool call identifier")
-        ids.add(call_id)
-        calls.append({"id": call_id, "name": function["name"],
-                      "arguments": function.get("arguments", {})})
-    return calls
 
 
 def run_agent_turn(
     engine: InferenceEngine, session: Session, store: ChatStore, reader: ui.InputReader,
     limit: int | None, budget: ContextBudget, max_iterations: int,
 ) -> tuple[Usage, PromptCount] | None:
-    """Application orchestration: one response at a time, checkpoint every tool result."""
-    def read_artifact(artifact_id: str, start: int, max_chars: int) -> tuple[str, int]:
-        try:
-            return store.read_artifact(session, artifact_id, start, max_chars)
-        except SessionStorageError as exc:
-            raise ToolError(str(exc)) from exc
-
+    """Stream, approve, checkpoint, execute, checkpoint, then ask the model again."""
     for _ in range(max_iterations):
+        if limit is None:
+            limit = engine.context_limit(load=True)
         messages, count = assemble_messages(session.messages, TOOL_SCHEMAS, limit, budget)
-        pending = pending_artifacts(session.conversation)
-        if pending:
-            requests = [
-                {"artifact_id": artifact_id, "start": start, "max_chars": 12000}
-                for artifact_id, start in pending.items()
-            ]
-            messages.append({"role": "system", "content":
-                "Read these remaining artifact ranges with read_tool_output before answering: "
-                + json.dumps(requests)})
-            count = ConservativeTokenCounter().count(messages, TOOL_SCHEMAS)
         reader.set_context(count, limit, budget)
         stream = engine.stream_chat(messages, tools=TOOL_SCHEMAS)
         try:
-            if pending:
-                content = ui.collect_stream(stream, context_text=reader.context_text)
-            else:
-                content = ui.render_stream(stream, context_text=reader.context_text)
+            content = ui.render_stream(stream, context_text=reader.context_text)
         finally:
             close = getattr(stream, "close", None)
             if close is not None:
                 close()
-        raw_calls = engine.last_tool_calls
-        if not raw_calls and pending:
-            # Do not show or persist a conclusion drawn from a receipt. The next request
-            # repeats the explicit retrieval directive, within the existing iteration cap.
-            continue
-        if not raw_calls:
-            session.add_message("assistant", content)
+        calls = engine.last_tool_calls
+        if not calls:
+            session.add_message("assistant", content, thinking=engine.last_thinking or None)
             try:
                 store.save(session, engine.model)
             except SessionStorageError:
-                # Preserve the existing ordinary-chat retry behavior. Tool work uses strict saves.
+                # Retain ordinary chat retry behavior; command checkpoints are strict.
                 if any(m["role"] == "tool" for m in session.conversation):
                     raise
             return (engine.last_usage, count) if engine.last_usage is not None else None
-        calls = _calls(session, raw_calls)
-        result_start = session.begin_tools(content, calls)
-        # Persist paired placeholders before any tool runs. A crash never leaves orphaned calls.
+
+        result_start = session.begin_tools(content, calls, engine.last_thinking)
         store.save(session, engine.model)
         for index, call in enumerate(calls):
-            ui.print_tool_activity(call["name"], call["arguments"], "running")
+            function = call["function"]
+            name, arguments = function["name"], function.get("arguments", {})
             try:
-                output = dispatch(store.project, call["name"], call["arguments"], read_artifact)
-                status = "success"
+                command = validate_command(store.project, name, arguments)
             except ToolError as exc:
-                output, status = ToolOutput(str(exc)), "error"
-            artifact_id = output.artifact_id or store.save_artifact(session, output.content)
-            truncated = output.truncated
-            result = json.dumps({
-                "status": status, "excerpt": output.excerpt, "truncated": truncated,
-                "artifact_id": artifact_id,
-                "start": output.start, "next_start": output.start + len(output.excerpt),
-                "total_chars": len(output.content) if output.total_chars is None
-                               else output.total_chars,
-                "retrieval": "Use read_tool_output with artifact_id and start=next_start.",
-            }, ensure_ascii=False)
-            session.complete_tool(result_start + index, result, status, artifact_id)
-            # Artifacts are durable already. Save this result before attempting the next call.
+                result = command_result("error", str(exc))
+            else:
+                approval = ui.approve_command(command)
+                if approval != "approved":
+                    result = command_result(approval, "Command was not executed.")
+                else:
+                    session.set_tool_result(result_start + index, command_result(
+                        "pending", "Approved command may have started; outcome is unknown "
+                        "until a completed result is saved. Never automatically rerun it.",
+                        command=command.command, shell=command.shell, cwd=str(command.cwd),
+                        timeout_seconds=command.timeout_seconds,
+                    ))
+                    # If this save fails, the subprocess must never start.
+                    store.save(session, engine.model)
+                    ui.print_tool_activity(name, arguments, "running")
+                    result = run_command(command)
+            session.set_tool_result(result_start + index, result)
             store.save(session, engine.model)
-            ui.print_tool_activity(call["name"], call["arguments"], status, truncated)
+            ui.print_tool_activity(
+                name, arguments, result["status"], result.get("truncated", False),
+            )
+            if result["status"] == "cancelled":
+                return None
     ui.print_error("Tool loop limit", f"Stopped after {max_iterations} model responses. "
-                   "Tool results are saved; enter a new message to continue.")
+                   "Command results are saved; enter a new message to continue.")
     return None
 
 

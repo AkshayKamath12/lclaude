@@ -1,138 +1,146 @@
-# Read-only tool loop
+# Command tool loop
 
-lclaude sends explicit JSON tool definitions using [Ollama structured tool calling](https://docs.ollama.com/capabilities/tool-calling).
-A model response may request several tools. lclaude validates each request, executes
-calls in their original order, then sends the results in the next inference request.
-Ordinary responses still stream. A stream must end with Ollama's completion marker
-before any assistant message or tool calls are accepted.
+lclaude uses the [Ollama Python SDK's structured tool calling](https://docs.ollama.com/capabilities/tool-calling).
+The flow is:
 
-The application loop coordinates these steps. Tools perform project reads; the
-inference engine handles Ollama transport; session state owns messages; the store
-owns artifacts and atomic snapshots; the terminal UI renders activity.
+```text
+stream model response → validate call → ask for approval
+  → save pending execution → run command → save result → next model request
+```
 
-## Tools and bounds
+The CLI coordinates the loop. `engine.py` owns SDK transport and streaming;
+`tools.py` validates requests and runs subprocesses; `session.py` owns ordered
+messages; `persistence.py` atomically saves them; `ui.py` owns approval and rendering.
+There is no separate tool ledger or generic dispatch framework.
 
-| Tool | Arguments | Behavior |
-| --- | --- | --- |
-| `list_files` | `path="."`, `glob="**/*"`, `limit=200`, `max_chars=4000` | Discover project files. The excerpt contains at most `limit` paths. |
-| `read_file` | `path`, `start_line=1`, optional `end_line`, `max_chars=4000` | Read UTF-8 text. Line numbers are inclusive and start at 1. |
-| `search_text` | `query`, `glob="**/*"`, `limit=100`, `max_chars=4000` | Case-insensitive literal search. The excerpt contains at most `limit` matches with file and line locations. |
-| `read_tool_output` | `artifact_id`, `start=0`, `max_chars=4000` | Retrieve saved text using a zero-based character offset. |
+## One tool: run_command
 
-`max_chars` must be between 1 and 12,000. List limits range from 1 to 2,000;
-search limits range from 1 to 1,000. Unknown arguments, wrong types, missing
-files, and invalid ranges produce explicit error results for the model.
+| Argument | Meaning |
+| --- | --- |
+| `command` | Required nonempty shell script. |
+| `shell` | Required: `powershell` on Windows; `sh` on Linux/macOS. |
+| `cwd` | Existing directory, relative to the launch directory or absolute. Default: `.`. |
+| `timeout_seconds` | Integer from 1 to 300. Default: 60. Separate from the Ollama socket timeout. |
 
-Relative paths use the resolved launch directory. Absolute paths must remain
-inside it. Traversal and links outside the project are rejected or excluded from
-discovery. Recursive discovery excludes `.git`, `.venv`, `venv`, `node_modules`,
-and `__pycache__`. Glob matching is case-sensitive and uses project-relative
-paths; `**/*` also includes root-level files. Git ignore rules are not applied.
-Search skips non-UTF-8 and NUL-containing files; explicitly reading them returns
-an error. Filesystem permission failures are reported.
+On Windows, commands run through Windows PowerShell
+(`System32/WindowsPowerShell/v1.0/powershell.exe`) with no profile and noninteractive
+input. On Linux/macOS, commands run through `/bin/sh -c`. Bash and PowerShell syntax
+are not interchangeable: unsupported shell requests are rejected, never translated.
+PowerShell's console output encoding is set to UTF-8; captured bytes are decoded
+as UTF-8 with replacement for invalid sequences.
 
-Each executed result, including errors, has a complete UTF-8 artifact. Excerpt
-limits do not discard the rest of a listing, search result, or selected file
-range. Retrieval reuses the original artifact ID. A result includes its excerpt,
-status, truncation flag, artifact ID, character offsets, and retrieval instructions.
-The model can pass `next_start` as `start` to retrieve the next portion.
+Before every execution the terminal shows the **entire command**, shell, resolved
+directory, and timeout. Control characters are escaped visibly. Only an explicit
+`y` or `yes` approves; Enter, EOF, and other answers reject. Ctrl+C cancels.
+Redirected input cannot approve commands. Approval applies to that one call only.
 
-The iteration limit counts model responses per submitted user message, including
-the final answer. The default is 10. Reaching it stops after saving completed
-tool work; the next user message starts a new allowance.
+Commands run with the user's permissions. **The working directory is not a security
+sandbox.** A command can modify files, access the network, or start other processes.
+There is no automatic approval or trusted mode in this change.
 
-## Schema version 2
+## Streaming, ordering, and limits
 
-The session JSON retains the original ordered transcript. Assistant messages
-keep the complete call list from each response. Each call has a matching result
-in the same order. Server-provided IDs are preserved; absent IDs receive stable
-internal UUIDs. Raw JSON chat streaming avoids SDK conversion that would drop
-optional IDs or malformed arguments before validation.
+The assistant's text streams normally. Thinking text and structured tool calls
+are accumulated alongside it. Nothing executes until the SDK stream finishes
+with a completion marker. Partial assistant messages are never saved as complete.
 
-Version-1 sessions are loaded without rewriting them. Their next save uses v2.
-Artifacts live under `<project-store>/<session-id>/artifacts/<artifact-id>.txt`
-and are accessible only through that session's manifest.
+Calls from one response execute sequentially, each with its own approval.
+The complete assistant call list is followed by matching `role: "tool"` messages
+in the original order. Thinking fields are retained for subsequent requests.
+The SDK's message shape is used directly; no synthetic call IDs are required.
+Historical IDs remain in saved chats when importing older versions.
 
-This complete example references an artifact containing `one\ntwo\nthree\n`:
+The loop requests another model response after saving every result, including
+rejections and execution errors. Cancellation stops the turn. The default
+`--max-tool-iterations 10` counts model responses per user submission, including
+the final response. At the limit, any calls in that last response are processed
+and saved, then the loop stops. It does not automatically continue on resume.
+
+Stdout and stderr each retain at most **6,000 bytes**. Both pipes are drained
+concurrently so large output cannot fill a pipe and deadlock the command.
+Excess output is discarded. The result includes a truncation flag and explicit
+notice that omitted output was not saved. The **same bounded JSON result** is
+saved and sent to the model. There are no artifacts, retrieval tools, or rules
+withholding final answers until output has been fully read.
+
+Results distinguish success, nonzero exit, execution/capture error, timeout,
+rejection, and cancellation. Completed subprocess results include exit code,
+stdout, stderr, and truncation state. Ctrl+C and timeout attempt to stop the
+process tree on Windows (`taskkill /T /F`) or process group on POSIX. Cleanup
+failures are reported. Deliberately detached processes can escape cleanup;
+commands are not contained by the application. Partial effects are never undone.
+
+## Persistence and resume
+
+Before approval, the complete call bundle is saved with `not_started` placeholders.
+After approval, the current call becomes `pending` and is durably saved **before**
+the subprocess starts. That record includes the resolved directory and shell.
+After execution, its placeholder is replaced by the bounded result and saved
+**before** another command or model request. A failed checkpoint stops the loop.
+
+- `not_started`: execution was not started by the application.
+- `pending`: execution may have started or finished, but no completed outcome was saved.
+- Completed status: the saved result describes what the application observed.
+
+A crash can happen after an external effect but before its result is saved.
+Consequently, pending commands have an **unknown outcome**; they are never
+automatically rerun or described as successfully rolled back. A later inference
+failure cannot remove recorded command activity. Resuming displays saved activity,
+explains these statuses, and waits for the user's next message.
+
+An interrupted initial chat response still discards its unfulfilled user prompt.
+Atomic snapshots use a temporary file, flush/fsync, then replacement. Command
+execution and file replacement cannot form one transaction, hence the pending state.
+
+## Schema version 3
+
+V3 stores messages close to the SDK format. Result status lives inside the JSON
+`content` of its tool message; no parallel ledger or artifact manifest is written.
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "session_id": "a65e3b8b-f25d-4c04-9235-8b2d5d2f8850",
-  "project": {"path": "C:\\work\\demo"},
-  "created_at": "2026-10-01T18:00:00+00:00",
-  "updated_at": "2026-10-01T18:00:05+00:00",
-  "model": "qwen2.5:7b-instruct",
+  "project": {"path": "/work/demo"},
+  "created_at": "2026-10-02T18:00:00+00:00",
+  "updated_at": "2026-10-02T18:00:05+00:00",
+  "model": "qwen3",
   "messages": [
-    {"role": "user", "content": "Read the notes."},
+    {"role": "user", "content": "Print hello."},
     {
       "role": "assistant",
-      "content": "",
+      "content": "I will print hello.",
+      "thinking": "A short command will do.",
       "tool_calls": [
-        {"id": "call_01", "name": "read_file", "arguments": {"path": "notes.txt", "max_chars": 4}}
+        {"function": {"name": "run_command", "arguments": {"command": "printf hello", "shell": "sh"}}}
       ]
     },
     {
       "role": "tool",
-      "tool_call_id": "call_01",
-      "name": "read_file",
-      "status": "success",
-      "artifact_id": "art_0123456789abcdef0123456789abcdef",
-      "content": "{\"status\":\"success\",\"excerpt\":\"one\\n\",\"truncated\":true,\"artifact_id\":\"art_0123456789abcdef0123456789abcdef\",\"start\":0,\"next_start\":4,\"total_chars\":14,\"retrieval\":\"Use read_tool_output with artifact_id and start=next_start.\"}"
+      "tool_name": "run_command",
+      "content": "{\"status\":\"success\",\"detail\":\"Command completed.\",\"exit_code\":0,\"stdout\":\"hello\",\"stderr\":\"\",\"truncated\":false}"
     },
-    {"role": "assistant", "content": "The first line is one; further lines are available in the saved output."}
-  ],
-  "artifacts": [
-    {
-      "id": "art_0123456789abcdef0123456789abcdef",
-      "path": "artifacts/art_0123456789abcdef0123456789abcdef.txt",
-      "media_type": "text/plain",
-      "size_bytes": 14,
-      "size_chars": 14
-    }
+    {"role": "assistant", "content": "The command printed hello."}
   ]
 }
 ```
 
-## Interruption and resume
+Version-1 plain chats and version-2 read-only tool chats remain readable. V2 call
+and result fields are converted on load; old receipts remain historical text.
+Interrupted/incomplete legacy results become pending with an unknown-outcome
+explanation. Existing artifact files are left untouched but are no longer
+accessed; their manifest is omitted on the next save, which writes v3.
+Simply opening a chat does not rewrite it.
 
-Before executing a batch, lclaude atomically saves the complete assistant call
-list and one `interrupted` result placeholder per call. This is a recovery
-checkpoint, never an inference request with missing results. A placeholder says
-that no completed result was saved: execution may not have started, or may have
-been interrupted.
+## Context budget
 
-After each call, lclaude flushes and fsyncs its full artifact, replaces the result
-placeholder, and atomically saves the session before starting the next call.
-Completed result statuses are `success` or `error`. A saving failure stops the
-loop and is shown to the user; the last durable checkpoint remains readable.
+Every inference iteration counts instructions, message content, thinking,
+tool-call arguments, results, tool definitions, and message overhead. The existing
+conservative estimate plus reserved reply tokens must fit the context allocation.
+The transcript is never compacted, summarized, or stripped of call/result pairs.
 
-Ctrl+C or a connection failure during subsequent inference discards the partial
-assistant response. Already saved tool results remain paired with their calls.
-An interrupted initial inference still rolls back its unfulfilled user message.
-Unexpected process termination leaves the last checkpoint intact. A crash before
-a result checkpoint may leave that call marked interrupted and an unreferenced
-artifact on disk.
-
-Startup and `/chat` replay saved tool statuses and explain unfinished work.
-They neither generate a response nor repeat calls. The next user message supplies
-direction, with a context notice that completed calls should not be repeated
-automatically. `/clear` creates a new identity and manifest while retaining
-earlier saved sessions and artifacts.
-
-## Context and practical limits
-
-The token estimate includes tool definitions, assistant arguments and identifiers,
-results, retrieval excerpts, and continuation notices. Prompt assembly works on
-copies. For tool conversations with a known context limit, it reduces retrievable
-excerpts and preserves their artifact receipts until the estimated prompt plus
-reserved reply tokens fits. It never removes messages or call/result pairs.
-If even minimal receipts cannot fit, inference stops with an actionable error.
-There is no summarization. The saved transcript remains unchanged by assembly.
-
-Counts are estimates, not an exact model tokenizer. When the runtime context
-size is unknown, excerpt limits still apply but fit cannot be guaranteed.
-Full reads and searches can consume time, RAM, and disk proportional to their
-complete output. Artifacts have no automatic retention or quota policy.
-Path containment is checked using resolved paths; it is not an OS security
-sandbox against concurrent filesystem changes.
+An oversized request stops with a clear error; recorded command activity remains
+saved. Increase `--num-ctx`, reduce `--max-response-tokens`, or start a fresh chat.
+If the runtime allocation is unknown, lclaude attempts to load the model and
+query it. If it remains unknown, set `--num-ctx` explicitly. Counts are estimates,
+not a model-specific tokenizer or a guarantee against server-side truncation.

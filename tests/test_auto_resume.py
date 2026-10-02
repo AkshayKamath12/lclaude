@@ -30,14 +30,16 @@ def test_launch_resumes_newest_project_chat_with_current_instructions(
     before = (store.directory / f"{latest.session_id}.json").read_bytes()
     with (
         patch("sys.argv", ["lclaude", *(["--model", "override"] if override else [])]),
-        patch("lclaude.engine.OllamaTransport") as client,
+        patch("lclaude.engine.ollama.Client") as client,
         patch("lclaude.ui.InputReader.read", side_effect=["next", None]),
         patch("signal.signal"),
     ):
         client.return_value.list.return_value = {
             "models": [{"model": "saved"}, {"model": "override"}]
         }
-        client.return_value.ps.return_value = {"models": []}
+        client.return_value.ps.return_value = {"models": [
+            {"model": name, "context_length": 8192} for name in ("saved", "override")
+        ]}
         client.return_value.chat.return_value = iter([
             {"done": True, "message": {"content": "next answer"}},
         ])
@@ -84,7 +86,7 @@ def test_missing_saved_model_does_not_silently_fall_back(tmp_path, monkeypatch, 
     before = path.read_bytes()
     with (
         patch("sys.argv", ["lclaude"]),
-        patch("lclaude.engine.OllamaTransport") as client,
+        patch("lclaude.engine.ollama.Client") as client,
         patch("lclaude.cli.run_chat_loop") as loop,
         pytest.raises(SystemExit),
     ):
@@ -113,12 +115,14 @@ def test_resume_without_new_turn_does_not_write_or_generate(tmp_path, monkeypatc
     before = path.read_bytes()
     with (
         patch("sys.argv", ["lclaude"]),
-        patch("lclaude.engine.OllamaTransport") as client,
+        patch("lclaude.engine.ollama.Client") as client,
         patch("lclaude.ui.InputReader.read", return_value=None),
         patch("signal.signal"),
     ):
         client.return_value.list.return_value = {"models": [{"model": "saved"}]}
-        client.return_value.ps.return_value = {"models": []}
+        client.return_value.ps.return_value = {"models": [
+            {"model": name, "context_length": 8192} for name in ("saved", "override")
+        ]}
         main()
     client.return_value.chat.assert_not_called()
     assert path.read_bytes() == before

@@ -4,7 +4,7 @@
 
 **Chat and inspect your project with local Ollama models from your terminal.** lclaude streams responses, loads project instructions, and saves chats so you can resume them later. It runs on Windows, macOS, and Linux with Python 3.10 or newer; no hosted AI account is needed with the default local setup.
 
-> lclaude provides chat, read-only project tools, model selection, context estimates, and saved sessions. It does not yet edit files or run shell commands.
+> lclaude provides chat, an approval-gated command tool, model selection, context budgeting, and saved sessions. Commands run with your permissions and can modify files; the working directory is not a sandbox.
 
 ## Install
 
@@ -60,19 +60,22 @@ By default, lclaude uses the most recently saved chat's model. For a new chat it
 - At launch, lclaude loads `AGENTS.md` from the current directory, or `agents.md` if the uppercase file is absent. A blank or missing file uses a default prompt. Instructions are loaded again on the next launch.
 - Completed chats are stored as JSON under `~/.local_claude/chats/`, grouped by launch directory. Startup resumes the newest valid chat; `/clear` starts a fresh one.
 - In interactive mode, **Enter** submits and **Alt+Enter** inserts a newline. **Ctrl+C** exits at the prompt or aborts the current response. Redirected input is handled one line at a time.
-- The context footer estimates instructions, conversation, tool definitions, and reserved reply space. Plain chat keeps its advisory budget. For tool conversations, lclaude reduces retrievable excerpts to fit; if complete call/result pairs still cannot fit, it stops and keeps the saved transcript.
+- The context footer estimates instructions, conversation, tool definitions, and reserved reply space. Every model request must fit the estimated budget. If it cannot fit, lclaude explains how to adjust the context and preserves recorded command activity; it never silently removes messages.
 
-## Project tools
+## Command tool
 
-With an Ollama model that supports structured tool calling, the model can use
-`list_files`, `read_file`, `search_text`, and `read_tool_output`. Paths resolve
-against the launch directory. Tool activity appears in the terminal, and large
-outputs remain available as session-owned artifacts.
+With an Ollama model that supports structured tool calling, the model can request
+`run_command`. You see the full command, shell, directory, and timeout before
+approving each call. Windows uses Windows PowerShell; Linux/macOS use `/bin/sh`.
+Relative directories resolve against the launch directory. Redirected input
+cannot approve commands. Ctrl+C cancels execution; it cannot undo effects.
 
-Completed tool results survive interrupted responses. On resume, lclaude shows
-the saved work and waits for your next message. Version-1 chats remain readable.
-See [tool behavior and session format](docs/tool-loop.md) for limits, retrieval,
-and interruption details.
+Stdout and stderr each retain at most 6,000 bytes, with an explicit truncation
+notice; omitted output is not saved. Completed results survive interrupted
+responses. On resume, lclaude explains pending/unknown outcomes and waits for
+your next message without rerunning commands. Version-1 and version-2 chats remain
+readable. See [tool behavior and session format](docs/tool-loop.md) for limits,
+approval, persistence, and interruption details.
 
 ## Development
 

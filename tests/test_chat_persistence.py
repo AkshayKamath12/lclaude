@@ -293,7 +293,7 @@ def test_launch_instructions_apply_to_resumed_requests_and_clear(
     expected = content if content and content.strip() else DEFAULT_SYSTEM_PROMPT
     with (
         patch("sys.argv", ["lclaude"]),
-        patch("lclaude.engine.OllamaTransport") as client,
+        patch("lclaude.engine.ollama.Client") as client,
         patch("lclaude.ui.choose_chat", return_value=session.session_id),
         patch("lclaude.ui.InputReader.read", side_effect=[
             "/chat", "next", "/clear", "fresh", "/chat", "again", None,
@@ -301,7 +301,9 @@ def test_launch_instructions_apply_to_resumed_requests_and_clear(
         patch("signal.signal"),
     ):
         client.return_value.list.return_value = {"models": [{"model": "new"}]}
-        client.return_value.ps.return_value = {"models": []}
+        client.return_value.ps.return_value = {"models": [
+            {"model": "new", "context_length": 8192}
+        ]}
         client.return_value.chat.side_effect = [
             iter([{"done": True, "message": {"content": "response"}}]) for _ in range(3)
         ]

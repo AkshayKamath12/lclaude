@@ -1,11 +1,10 @@
 """Inference engine module for communicating with the local Ollama daemon."""
 
-import json
-from collections.abc import Generator, Sequence
+from collections.abc import Generator
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
 
 import httpx
 import ollama
@@ -26,51 +25,6 @@ class Usage:
 
     prompt_eval_count: int | None = None
     eval_count: int | None = None
-
-
-class OllamaTransport:
-    """SDK model discovery with lossless JSON chat streaming.
-
-    SDK message models discard unrecognized fields, including optional call IDs.
-    Read chat chunks directly through HTTPX so validation sees the original arguments
-    and identifiers. The public SDK still handles model discovery and loading.
-    """
-
-    def __init__(self, host: str, timeout: float) -> None:
-        self._models = ollama.Client(host=host, timeout=timeout)
-        self.host = host.rstrip("/")
-        self.timeout = timeout
-
-    def list(self) -> ollama.ListResponse:
-        return self._models.list()
-
-    def ps(self) -> ollama.ProcessResponse:
-        return self._models.ps()
-
-    def generate(self, model: str, prompt: str,
-                 stream: Literal[False] = False) -> ollama.GenerateResponse:
-        return self._models.generate(model=model, prompt=prompt, stream=stream)
-
-    def chat(self, *, model: str, messages: Sequence[dict[str, Any]],
-             tools: Sequence[dict[str, Any]] | None, stream: bool,
-             options: dict[str, Any]) -> Generator[dict[str, Any], None, None]:
-        with httpx.stream(
-            "POST", f"{self.host}/api/chat",
-            json={"model": model, "messages": messages, "tools": tools,
-                  "stream": stream, "options": options}, timeout=self.timeout,
-        ) as response:
-            if response.is_error:
-                response.read()
-                raise ollama.ResponseError(response.text, response.status_code)
-            for line in response.iter_lines():
-                if not line:
-                    continue
-                chunk = json.loads(line)
-                if not isinstance(chunk, dict):
-                    raise OllamaEngineError("Ollama returned a non-object chat chunk")
-                if chunk.get("error"):
-                    raise ollama.ResponseError(str(chunk["error"]))
-                yield chunk
 
 
 class InferenceEngine:
@@ -94,7 +48,8 @@ class InferenceEngine:
         self.last_tool_calls: list[dict[str, Any]] = []
         self.model = model
         self.host = host.rstrip("/")
-        self.ollama_client = OllamaTransport(host=host, timeout=timeout)
+        self.last_thinking = ""
+        self.ollama_client = ollama.Client(host=host, timeout=timeout)
 
     @contextmanager
     def _error_boundary(
@@ -195,11 +150,13 @@ class InferenceEngine:
         """Stream text; publish structured calls and usage only after a completed response."""
         self.last_usage = None
         self.last_tool_calls = []
+        self.last_thinking = ""
         generation_options = dict(options or {})
         generation_options["num_predict"] = self.num_predict
         if self.num_ctx is not None:
             generation_options["num_ctx"] = self.num_ctx
         calls: list[dict[str, Any]] = []
+        thinking: list[str] = []
         usage = None
         done = False
         with self._error_boundary("token streaming"):
@@ -210,12 +167,19 @@ class InferenceEngine:
             try:
                 for chunk in response:
                     message = chunk.get("message", {})
+                    if message.get("thinking"):
+                        thinking.append(message["thinking"])
                     for call in message.get("tool_calls") or []:
                         item = call.model_dump(exclude_none=True) if hasattr(
                             call, "model_dump"
                         ) else deepcopy(call)
                         if not isinstance(item, dict):
                             raise OllamaEngineError("Malformed structured tool call")
+                        function = item.get("function")
+                        if not isinstance(function, dict) or not isinstance(
+                            function.get("name"), str
+                        ):
+                            raise OllamaEngineError("Malformed structured tool function")
                         calls.append(item)
                     content = message.get("content") or ""
                     if content:
@@ -230,4 +194,5 @@ class InferenceEngine:
                 if close is not None:
                     close()
             self.last_tool_calls = calls
+            self.last_thinking = "".join(thinking)
             self.last_usage = usage

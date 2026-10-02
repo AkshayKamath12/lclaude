@@ -32,6 +32,7 @@ from rich.markdown import Markdown
 
 from lclaude.context import ContextBudget, PromptCount
 from lclaude.engine import Usage
+from lclaude.tools import Command
 
 
 class StreamAbortedError(Exception):
@@ -448,12 +449,12 @@ def render_conversation(messages: Iterable[Mapping[str, Any]], *, chat_id: str) 
         console.rule(f"Resumed chat {chat_id}")
     else:
         sys.stdout.write(f"\nResumed chat {chat_id}\n\n")
-    calls: dict[str, Any] = {}
+    calls: list[dict[str, Any]] = []
     try:
         for message in messages:
             role = message["role"]
             if role == "assistant" and message.get("tool_calls"):
-                calls = {c["id"]: c["arguments"] for c in message["tool_calls"]}
+                calls = list(message["tool_calls"])
                 if not message["content"]:
                     continue
             if role == "tool":
@@ -462,8 +463,10 @@ def render_conversation(messages: Iterable[Mapping[str, Any]], *, chat_id: str) 
                 except ValueError:
                     result = {}
                 truncated = isinstance(result, dict) and bool(result.get("truncated"))
-                print_tool_activity(message["name"], calls.get(message["tool_call_id"], {}),
-                                    message["status"], truncated)
+                call = calls.pop(0) if calls else {}
+                print_tool_activity(message["tool_name"],
+                                    call.get("function", {}).get("arguments", {}),
+                                    result.get("status", "unknown"), truncated)
                 continue
             if role not in ("user", "assistant"):
                 continue
@@ -509,23 +512,6 @@ def render_stream(token_stream: Iterable[str], *, context_text: str = "") -> str
         raise StreamAbortedError() from None
 
 
-def collect_stream(token_stream: Iterable[str], *, context_text: str = "") -> str:
-    """Keep an unverified artifact-based answer off screen while preserving activity."""
-    try:
-        if not sys.stdout.isatty():
-            return "".join(token_stream)
-        console = Console(file=sys.stdout, force_terminal=True)
-        with pinned_footer(console, context_text) as refresh_footer:
-            with console.status("Reading saved output…"):
-                content = []
-                for token in token_stream:
-                    content.append(token)
-                    refresh_footer()
-                return "".join(content)
-    except KeyboardInterrupt:
-        raise StreamAbortedError() from None
-
-
 def _render_terminal_stream(
     token_stream: Iterable[str], console: Console, refresh_footer: Callable[[], None],
 ) -> str:
@@ -563,46 +549,55 @@ def print_aborted() -> None:
     sys.stdout.flush()
 
 
-def print_tool_activity(name: str, arguments: Any, status: str, truncated: bool = False) -> None:
-    """Readable activity with relevant arguments, without JSON receipts or artifact IDs."""
-    def safe(value: Any, limit: int = 120) -> str:
-        text = json.dumps(str(value), ensure_ascii=True)[1:-1]
-        return text if len(text) <= limit else text[:limit - 3] + "..."
+def _safe_tool_text(value: Any) -> str:
+    """Make control characters visible so a command cannot hide its approval display."""
+    return "".join(
+        char if char.isprintable() else char.encode("unicode_escape").decode("ascii")
+        for char in str(value)
+    )
 
-    label = safe(name, 60)
-    details = "invalid arguments"
-    if isinstance(arguments, dict):
-        if name == "list_files":
-            details = safe(arguments.get("path", "."))
-            if arguments.get("glob") not in (None, "**/*"):
-                details += f" (pattern {safe(arguments['glob'], 40)})"
-        elif name == "read_file":
-            details = safe(arguments.get("path", ""))
-            if "start_line" in arguments or "end_line" in arguments:
-                details += (f", lines {safe(arguments.get('start_line', 1), 12)}"
-                            f" to {safe(arguments.get('end_line', 'end'), 12)}")
-        elif name == "search_text":
-            details = safe(arguments.get("query", ""))
-            if "glob" in arguments:
-                details += f" in {safe(arguments['glob'], 40)}"
-        elif name == "read_tool_output":
-            details = f"saved output from character {safe(arguments.get('start', 0), 12)}"
-        else:
-            details = "unknown tool"
-    state = {"success": "done", "error": "failed", "interrupted": "interrupted"}.get(status, status)
-    line = f"  {label}: {details} - {state}"
+
+def approve_command(command: Command) -> str:
+    """Show the complete request and require explicit interactive approval."""
+    sys.stdout.write(
+        f"\nrun_command\n  Shell: {command.shell}\n"
+        f"  Directory: {_safe_tool_text(command.cwd)}\n"
+        f"  Timeout: {command.timeout_seconds}s\n"
+        f"  Command: {_safe_tool_text(command.command)}\n"
+        "  Runs with your permissions; the directory is not a sandbox.\n"
+    )
+    sys.stdout.flush()
+    if not sys.stdin.isatty():
+        sys.stdout.write("Command rejected: approval requires interactive input.\n")
+        return "rejected"
+    try:
+        return "approved" if input("Run this command? [y/N] ").strip().lower() in (
+            "y", "yes",
+        ) else "rejected"
+    except EOFError:
+        return "rejected"
+    except KeyboardInterrupt:
+        return "cancelled"
+
+
+def print_tool_activity(name: str, arguments: Any, status: str, truncated: bool = False) -> None:
+    details = arguments.get("command", "") if isinstance(arguments, dict) else "invalid arguments"
+    text = _safe_tool_text(details)
+    if len(text) > 120:
+        text = text[:117] + "..."
+    line = f"  {_safe_tool_text(name)}: {text} - {status}"
     if truncated:
-        line += "; remaining output saved"
-    if sys.stdout.isatty():
-        Console(file=sys.stdout).print(line, style="dim", markup=False, highlight=False)
-    else:
-        sys.stdout.write(line + "\n")
+        line += "; output truncated (omitted output not saved)"
+    sys.stdout.write(line + "\n")
     sys.stdout.flush()
 
 
 def print_tool_resume() -> None:
-    sys.stdout.write("\nThe previous turn stopped after tool work. Completed results are saved. "
-                     "Incomplete calls are marked; no calls are repeated automatically.\n")
+    sys.stdout.write(
+        "\nThe previous turn stopped after tool work. Completed results are saved. "
+        "Pending commands have an unknown outcome; not_started commands were not executed. "
+        "No commands are repeated automatically.\n"
+    )
 
 
 def print_session_end() -> None:

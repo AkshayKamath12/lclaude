@@ -1,7 +1,6 @@
-"""Artifacts, schema v2 pairing, migration, and snapshot isolation."""
+"""Versioned command transcripts, including older read-only and plain chats."""
 
 import json
-from copy import deepcopy
 
 import pytest
 
@@ -9,100 +8,123 @@ from lclaude.persistence import ChatStore, SessionStorageError, deserialize, ser
 from lclaude.session import Session
 
 
-def tool_session(store):
+def tool_call(name="run_command", call_id=None):
+    result = {"function": {"name": name, "arguments": {"command": "echo hi", "shell": "sh"}}}
+    if call_id:
+        result["id"] = call_id
+    return result
+
+
+def session_with_tools():
     session = Session()
     session.add_message("user", "inspect")
-    artifact = store.save_artifact(session, "complete output")
-    start = session.begin_tools("Looking.", [
-        {"id": "call-a", "name": "read_file", "arguments": {"path": "a.py"}},
-        {"id": "call-b", "name": "list_files", "arguments": {}},
-    ])
-    session.complete_tool(start, "excerpt", "success", artifact)
-    return session, artifact
+    start = session.begin_tools("checking", [tool_call()], thinking="reasoning")
+    return session, start
 
 
-def test_artifact_and_interrupted_tool_turn_round_trip(tmp_path):
+def test_v3_sdk_shape_pending_then_completed(tmp_path):
     store = ChatStore(tmp_path)
-    session, artifact = tool_session(store)
+    session, start = session_with_tools()
+    session.set_tool_result(start, {"status": "pending", "detail": "unknown outcome"})
     store.save(session, "model")
-    restored, _ = store.load(session.session_id)
-    assert restored.conversation == session.conversation
-    assert restored.needs_response
-    assert restored.turn_count == 0
-    assert store.read_artifact(restored, artifact) == ("complete output", 15)
-    assert store.read_artifact(restored, artifact, 9, 3) == ("out", 15)
-    path = store.directory / session.session_id / session.artifacts[0]["path"]
-    assert path.read_text(encoding="utf-8") == "complete output"
-    restored.add_message("user", "continue using saved results")
-    restored.add_message("assistant", "done")
-    store.save(restored, "model")
-    assert store.load(restored.session_id)[0].turn_count == 1
-
-
-def test_v1_migrates_only_on_save(tmp_path):
-    store = ChatStore(tmp_path)
-    session = Session()
-    session.add_message("user", "q")
-    session.add_message("assistant", "a")
-    data = serialize(session, "m", store.project, session.updated_at)
-    data["schema_version"] = 1
-    del data["artifacts"]
-    store.directory.mkdir(parents=True)
-    path = store.directory / f"{session.session_id}.json"
-    path.write_text(json.dumps(data), encoding="utf-8")
-    original = path.read_bytes()
     restored, model = store.load(session.session_id)
-    assert path.read_bytes() == original
-    assert model == "m" and restored.turn_count == 1
-    store.save(restored, model)
-    assert json.loads(path.read_text())["schema_version"] == 2
+    assert restored.conversation == session.conversation
+    assert restored.needs_response and model == "model"
+    session.set_tool_result(start, {"status": "success", "stdout": "hello", "truncated": False})
+    session.add_message("assistant", "done", thinking="finished reasoning")
+    store.save(session, "model")
+    data = json.loads((store.directory / f"{session.session_id}.json").read_text())
+    assert data["schema_version"] == 3 and "artifacts" not in data
+    assert data["messages"] == session.conversation
+    assert store.load(session.session_id)[0].conversation == session.conversation
 
 
-@pytest.mark.parametrize("mutation", ["order", "missing", "name", "duplicate",
-                                     "artifact", "path", "status"])
-def test_invalid_v2_rejected(tmp_path, mutation):
-    store = ChatStore(tmp_path)
-    session, artifact = tool_session(store)
-    data = serialize(session, "m", store.project, session.updated_at)
-    if mutation == "order":
-        data["messages"][2], data["messages"][3] = data["messages"][3], data["messages"][2]
-    elif mutation == "missing":
+@pytest.mark.parametrize("status", ["not_started", "pending", "success", "rejected", "error",
+                                    "nonzero_exit", "timeout", "cancelled"])
+def test_each_outcome_roundtrips(tmp_path, status):
+    session, start = session_with_tools()
+    session.set_tool_result(start, {"status": status, "detail": "details"})
+    data = serialize(session, "model", tmp_path, session.updated_at)
+    restored, _ = deserialize(data, tmp_path)
+    assert restored.conversation == session.conversation
+
+
+@pytest.mark.parametrize("corruption", [
+    "orphan", "missing", "wrong_name", "wrong_id", "bad_status",
+])
+def test_rejects_broken_call_result_pairs(tmp_path, corruption):
+    session, _ = session_with_tools()
+    data = serialize(session, "model", tmp_path, session.updated_at)
+    if corruption == "orphan":
+        del data["messages"][1]
+    elif corruption == "missing":
         data["messages"].pop()
-    elif mutation == "name":
-        data["messages"][2]["name"] = "other"
-    elif mutation == "duplicate":
-        data["messages"][1]["tool_calls"][1]["id"] = "call-a"
-    elif mutation == "artifact":
-        data["messages"][2]["artifact_id"] = "missing"
-    elif mutation == "path":
-        data["artifacts"][0]["path"] = "../outside.txt"
+    elif corruption == "wrong_name":
+        data["messages"][-1]["tool_name"] = "another"
+    elif corruption == "wrong_id":
+        data["messages"][-1]["tool_call_id"] = "unknown"
     else:
-        data["messages"][2]["status"] = "invented"
+        data["messages"][-1]["content"] = '{"status":"invented"}'
     with pytest.raises(SessionStorageError):
-        deserialize(data, store.project)
+        deserialize(data, tmp_path)
 
 
-def test_missing_cross_session_artifact_and_invalid_ranges(tmp_path):
-    store = ChatStore(tmp_path)
-    session, artifact = tool_session(store)
-    for other, start, size in [(Session(), 0, 1), (session, -1, 1),
-                                (session, 100, 1), (session, 0, True)]:
-        with pytest.raises(SessionStorageError):
-            store.read_artifact(other, artifact, start, size)
-    target = store.directory / session.session_id / session.artifacts[0]["path"]
-    target.unlink()
-    with pytest.raises(SessionStorageError):
-        store.read_artifact(session, artifact)
-    with pytest.raises(SessionStorageError):
-        store.save(session, "model")
+def test_v1_stays_readable_and_next_save_is_v3(tmp_path):
+    session = Session()
+    session.add_message("user", "old question")
+    session.add_message("assistant", "old answer")
+    data = serialize(session, "model", tmp_path, session.updated_at)
+    data["schema_version"] = 1
+    restored, _ = deserialize(data, tmp_path)
+    assert restored.conversation == session.conversation
+    assert serialize(restored, "model", tmp_path, restored.updated_at)["schema_version"] == 3
 
 
-def test_session_snapshots_and_clear_do_not_alias_calls(tmp_path):
-    store = ChatStore(tmp_path)
-    session, _ = tool_session(store)
-    original = deepcopy(session.conversation)
-    snapshot = session.conversation
-    snapshot[1]["tool_calls"][0]["arguments"]["path"] = "changed"
-    assert session.conversation == original
-    session.clear()
-    assert session.artifacts == [] and session.is_empty
+@pytest.mark.parametrize("status", ["success", "error", "interrupted", "incomplete"])
+def test_v2_calls_and_receipts_import_without_artifact_io(tmp_path, status):
+    session = Session()
+    data = {
+        "schema_version": 2, "session_id": session.session_id,
+        "project": {"path": str(tmp_path)}, "created_at": session.created_at,
+        "updated_at": session.updated_at, "model": "old",
+        "messages": [
+            {"role": "user", "content": "list files"},
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "old-call", "name": "list_files", "arguments": {}},
+            ]},
+            {"role": "tool", "name": "list_files", "tool_call_id": "old-call",
+             "status": status, "artifact_id": "art_0123456789abcdef0123456789abcdef",
+             "content": json.dumps({"excerpt": "README.md", "truncated": True,
+                                   "artifact_id": "art_0123456789abcdef0123456789abcdef"})},
+        ],
+        "artifacts": [{"id": "art_0123456789abcdef0123456789abcdef",
+                       "path": "artifacts/art_0123456789abcdef0123456789abcdef.txt",
+                       "media_type": "text/plain", "size_bytes": 9000, "size_chars": 9000}],
+    }
+    restored, _ = deserialize(data, tmp_path)
+    messages = restored.conversation
+    assert messages[1]["tool_calls"] == [{"id": "old-call", "function": {
+        "name": "list_files", "arguments": {},
+    }}]
+    assert messages[2]["tool_call_id"] == "old-call"
+    result = json.loads(messages[2]["content"])
+    assert result["excerpt"] == "README.md"
+    assert result["status"] == ("pending" if status in ("interrupted", "incomplete") else status)
+    current = serialize(restored, "new", tmp_path, restored.updated_at)
+    assert current["schema_version"] == 3
+    assert deserialize(current, tmp_path)[0].conversation == messages
+
+
+def test_session_snapshots_do_not_mutate_saved_calls(tmp_path):
+    session, _ = session_with_tools()
+    before = session.conversation
+    session.messages[1]["tool_calls"][0]["function"]["arguments"]["command"] = "changed"
+    assert session.conversation == before
+    assert not session.rollback()  # Command activity is never rolled back.
+
+
+def test_completed_results_cannot_be_overwritten():
+    session, start = session_with_tools()
+    session.set_tool_result(start, {"status": "success", "stdout": "original"})
+    with pytest.raises(ValueError, match="completed"):
+        session.set_tool_result(start, {"status": "pending"})

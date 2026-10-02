@@ -1,84 +1,183 @@
-"""Dispatch validation, project containment, and complete versus bounded output."""
+"""The single command tool: validation, bounded capture, and subprocess outcomes."""
+
+import io
+import subprocess
+import sys
+from unittest.mock import patch
 
 import pytest
 
-from lclaude.tools import ToolError, dispatch
+from lclaude import ui
+from lclaude.tools import OUTPUT_BYTES, SHELL, ToolError, run_command, validate_command
 
 
-def test_read_file_range_and_bounded_output(tmp_path):
-    (tmp_path / "a.txt").write_text("one\ntwo\nthree", encoding="utf-8")
-    output = dispatch(tmp_path, "read_file", {
-        "path": "a.txt", "start_line": 2, "end_line": 3, "max_chars": 4,
+def request(tmp_path, command, **kwargs):
+    return validate_command(tmp_path, "run_command", {
+        "command": command, "shell": SHELL, **kwargs,
     })
-    assert output.content == "two\nthree"
-    assert output.excerpt == "two\n"
-    assert output.truncated
 
 
-@pytest.mark.parametrize("name,args", [
-    ("shell", {}),
-    ("read_file", {}),
-    ("read_file", {"path": "../outside.txt"}),
-    ("read_file", {"path": "missing.txt"}),
-    ("read_file", {"path": "a.txt", "start_line": 0}),
-    ("read_file", {"path": "a.txt", "start_line": True}),
-    ("read_file", {"path": "a.txt", "start_line": 3, "end_line": 2}),
-    ("read_file", {"path": "a.txt", "end_line": 99}),
-    ("read_file", {"path": "a.txt", "max_chars": "10"}),
-    ("read_file", {"path": "a.txt", "extra": 1}),
-    ("read_file", {"path": 1}),
-    ("read_file", {"path": "a.txt", "max_chars": 12001}),
-    ("read_file", []),
-    ("read_file", '{"path":"a.txt"}'),
-    ("list_files", {"limit": False}),
-    ("list_files", {"path": "../"}),
-    ("search_text", {"query": ""}),
-    ("search_text", {"query": "a", "limit": -1}),
-    ("read_tool_output", {"artifact_id": "x", "start": -1}),
+@pytest.mark.parametrize("arguments", [
+    None, [], {}, {"command": ""}, {"command": "echo hi", "shell": "bash"},
+    {"command": "echo hi", "shell": SHELL, "extra": 1},
+    {"command": "echo hi", "shell": SHELL, "timeout_seconds": True},
+    {"command": "echo hi", "shell": SHELL, "timeout_seconds": 0},
+    {"command": "echo hi", "shell": SHELL, "timeout_seconds": 301},
+    {"command": "echo hi", "shell": SHELL, "cwd": 1},
+    {"command": "echo hi", "shell": SHELL, "cwd": "missing"},
+    {"command": "echo\0hi", "shell": SHELL},
 ])
-def test_argument_errors_are_clear(tmp_path, name, args):
-    (tmp_path / "a.txt").write_text("one\ntwo", encoding="utf-8")
-    with pytest.raises(ToolError) as error:
-        dispatch(tmp_path, name, args)
-    assert str(error.value)
-
-
-def test_list_and_search_keep_all_output_beyond_excerpt_limits(tmp_path):
-    (tmp_path / "a.py").write_text("needle\nNEEDLE\nneedle", encoding="utf-8")
-    (tmp_path / "b.py").write_text("other", encoding="utf-8")
-    (tmp_path / "nested").mkdir()
-    (tmp_path / "nested" / "c.py").write_text("needle", encoding="utf-8")
-    (tmp_path / ".git").mkdir()
-    (tmp_path / ".git" / "private").write_text("needle", encoding="utf-8")
-    listed = dispatch(tmp_path, "list_files", {"limit": 1})
-    assert listed.excerpt == "a.py\n"
-    assert "nested/c.py" in listed.content
-    assert ".git" not in listed.content
-    assert listed.truncated
-    found = dispatch(tmp_path, "search_text", {"query": "needle", "limit": 1})
-    assert found.excerpt == "a.py:1:needle\n"
-    assert "a.py:3:needle" in found.content and "nested/c.py:1:needle" in found.content
-    assert found.truncated
-
-
-def test_binary_read_error_and_search_skip(tmp_path):
-    (tmp_path / "bin").write_bytes(b"\xff\x00")
+def test_argument_validation(tmp_path, arguments):
     with pytest.raises(ToolError):
-        dispatch(tmp_path, "read_file", {"path": "bin"})
-    assert dispatch(tmp_path, "search_text", {"query": "x"}).content == ""
+        validate_command(tmp_path, "run_command", arguments)
 
 
-def test_symlinks_cannot_escape_project(tmp_path):
-    project = tmp_path / "project"
-    project.mkdir()
-    secret = tmp_path / "secret.txt"
-    secret.write_text("secret", encoding="utf-8")
-    try:
-        (project / "link.txt").symlink_to(secret)
-        (project / "outside").symlink_to(tmp_path, target_is_directory=True)
-    except OSError:
-        pytest.skip("Creating symlinks requires permission on this Windows installation")
-    with pytest.raises(ToolError, match="outside"):
-        dispatch(project, "read_file", {"path": "link.txt"})
-    assert dispatch(project, "search_text", {"query": "secret"}).content == ""
-    assert dispatch(project, "list_files", {}).content == ""
+def test_unknown_tool_and_non_directory(tmp_path):
+    with pytest.raises(ToolError, match="Unknown tool"):
+        validate_command(tmp_path, "read_file", {})
+    (tmp_path / "file").write_text("hello")
+    with pytest.raises(ToolError, match="not a directory"):
+        request(tmp_path, "echo hi", cwd="file")
+
+
+def test_resolves_relative_and_absolute_directories(tmp_path):
+    child = tmp_path / "child"
+    child.mkdir()
+    assert request(tmp_path, "echo hi", cwd="child").cwd == child.resolve()
+    # Working directory is not containment; absolute directories are allowed.
+    assert request(child, "echo hi", cwd=str(tmp_path)).cwd == tmp_path.resolve()
+
+
+def test_success_stderr_exit_code_and_working_directory(tmp_path):
+    command = ("[Console]::Out.Write((Get-Location).Path); "
+               "[Console]::Error.Write('problem'); exit 7"
+               if SHELL == "powershell" else "pwd; printf problem >&2; exit 7")
+    result = run_command(request(tmp_path, command))
+    assert result["status"] == "nonzero_exit"
+    assert result["exit_code"] == 7
+    assert str(tmp_path) in result["stdout"]
+    assert result["stderr"] == "problem"
+    assert not result["truncated"]
+
+
+def test_success_and_stdin_is_closed(tmp_path):
+    command = ("[Console]::Out.Write('hello'); [Console]::In.ReadToEnd()"
+               if SHELL == "powershell" else "printf hello; cat")
+    result = run_command(request(tmp_path, command))
+    assert result["status"] == "success"
+    assert result["stdout"].rstrip("\r\n") == "hello"
+
+
+def test_both_streams_are_bounded_and_drained(tmp_path):
+    command = ("[Console]::Out.Write('x' * 100000); [Console]::Error.Write('y' * 100000)"
+               if SHELL == "powershell" else
+               "head -c 100000 /dev/zero | tr '\\000' x; "
+               "head -c 100000 /dev/zero | tr '\\000' y >&2")
+    result = run_command(request(tmp_path, command))
+    assert result["status"] == "success"
+    assert result["stdout"] == "x" * OUTPUT_BYTES
+    assert result["stderr"] == "y" * OUTPUT_BYTES
+    assert result["truncated"]
+    assert "omitted output was not saved" in result["detail"]
+
+
+def test_timeout(tmp_path):
+    command = "Start-Sleep -Seconds 10" if SHELL == "powershell" else "sleep 10"
+    result = run_command(request(tmp_path, command, timeout_seconds=1))
+    assert result["status"] == "timeout"
+
+
+def test_cancellation_stops_spawned_process(tmp_path):
+    command = "Start-Sleep -Seconds 10" if SHELL == "powershell" else "sleep 10"
+    with patch("lclaude.tools.time.sleep", side_effect=KeyboardInterrupt):
+        result = run_command(request(tmp_path, command))
+    assert result["status"] == "cancelled"
+    assert result["exit_code"] is not None
+    assert "partial effects" in result["detail"]
+
+
+def test_spawn_error(tmp_path):
+    with patch("lclaude.tools.subprocess.Popen", side_effect=OSError("missing shell")):
+        result = run_command(request(tmp_path, "echo hi"))
+    assert result["status"] == "error"
+    assert "missing shell" in result["detail"]
+
+
+@pytest.mark.parametrize("platform,shell,expected", [
+    ("win32", "powershell", "powershell.exe"),
+    ("linux", "sh", "/bin/sh"),
+    ("darwin", "sh", "/bin/sh"),
+])
+def test_explicit_shell_invocation(tmp_path, platform, shell, expected):
+    from lclaude.tools import Command
+
+    with patch("lclaude.tools.sys.platform", platform), patch.object(
+        subprocess, "CREATE_NEW_PROCESS_GROUP", 512, create=True,
+    ), patch(
+        "lclaude.tools.subprocess.Popen", side_effect=OSError("inspection")
+    ) as spawn:
+        run_command(Command("echo hi", shell, tmp_path))
+    kwargs = spawn.call_args.kwargs
+    argv = spawn.call_args.args[0]
+    assert argv[0].endswith(expected)
+    assert kwargs["cwd"] == tmp_path
+    assert kwargs["stdin"] == subprocess.DEVNULL
+    assert "shell" not in kwargs
+
+
+@pytest.mark.parametrize("answer,expected", [("y", "approved"), ("YES", "approved"),
+                                            ("", "rejected"), ("no", "rejected")])
+def test_approval_shows_entire_request_before_prompt(tmp_path, answer, expected, capsys):
+    command = request(tmp_path, "echo " + "x" * 1000)
+    def approve(prompt):
+        visible = capsys.readouterr().out
+        assert command.command in visible
+        assert str(tmp_path) in visible
+        assert command.shell in visible and "not a sandbox" in visible
+        return answer
+    with patch.object(sys.stdin, "isatty", return_value=True), patch(
+        "builtins.input", side_effect=approve
+    ):
+        assert ui.approve_command(command) == expected
+
+
+@pytest.mark.parametrize("failure,expected", [(EOFError(), "rejected"),
+                                             (KeyboardInterrupt(), "cancelled")])
+def test_approval_interruption(tmp_path, failure, expected):
+    with patch.object(sys.stdin, "isatty", return_value=True), patch(
+        "builtins.input", side_effect=failure
+    ):
+        assert ui.approve_command(request(tmp_path, "echo hi")) == expected
+
+
+def test_noninteractive_never_approves(tmp_path):
+    with patch("sys.stdin", io.StringIO("yes\n")), patch("builtins.input") as prompt:
+        assert ui.approve_command(request(tmp_path, "echo hi")) == "rejected"
+    prompt.assert_not_called()
+
+
+def test_terminal_controls_are_escaped(tmp_path, capsys):
+    with patch.object(sys.stdin, "isatty", return_value=False):
+        ui.approve_command(request(tmp_path, "echo \x1b[2J"))
+    assert "\x1b" not in capsys.readouterr().out
+
+
+def test_unsupported_shell_is_never_substituted(tmp_path):
+    from lclaude.tools import Command
+
+    with patch("lclaude.tools.subprocess.Popen") as spawn:
+        result = run_command(Command("echo hi", "bash", tmp_path))
+    spawn.assert_not_called()
+    assert result["status"] == "error"
+
+
+def test_cleanup_failure_is_reported():
+    from unittest.mock import MagicMock
+
+    from lclaude.tools import _stop
+
+    process = MagicMock()
+    with patch("lclaude.tools.sys.platform", "win32"), patch(
+        "lclaude.tools.subprocess.run", side_effect=OSError("cleanup unavailable"),
+    ):
+        assert "could not be confirmed" in _stop(process)
