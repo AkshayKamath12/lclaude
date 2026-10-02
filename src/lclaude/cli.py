@@ -187,6 +187,8 @@ def run_agent_turn(
                 pass
             return (engine.last_usage, count) if engine.last_usage is not None else None
 
+        # Append the assistant call and ordered not_started placeholders before execution.
+        # result_start indexes them in memory
         result_start = session.begin_tools(content, calls, engine.last_thinking)
         store.save(session, engine.model)
         for index, call in enumerate(calls):
