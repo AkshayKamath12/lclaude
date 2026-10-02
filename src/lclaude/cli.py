@@ -177,9 +177,7 @@ def run_agent_turn(
         try:
             content = ui.render_stream(stream, context_text=reader.context_text)
         finally:
-            close = getattr(stream, "close", None)
-            if close is not None:
-                close()
+            stream.close()
         calls = engine.last_tool_calls
         if not calls:
             session.add_message("assistant", content, thinking=engine.last_thinking or None)
