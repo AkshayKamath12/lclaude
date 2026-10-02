@@ -11,7 +11,11 @@ import pytest
 from lclaude import ui
 from lclaude.cli import parse_args, run_chat_loop
 from lclaude.commands import ShowContext, handle_slash_command
-from lclaude.context import ConservativeTokenCounter, ContextBudget, PromptCount
+from lclaude.context import (
+    ConservativeTokenCounter,
+    ContextBudget,
+    PromptCount,
+)
 from lclaude.engine import InferenceEngine, OllamaEngineError, Usage
 from lclaude.instructions import load_system_prompt
 from lclaude.persistence import ChatStore
@@ -48,8 +52,8 @@ def test_unicode_code_and_empty_message_overhead():
 ])
 def test_runtime_discovery_uses_ps_and_alias(response):
     engine = InferenceEngine(model="model")
-    with patch.object(engine.ollama_client, "ps", return_value=response), patch.object(
-        engine.ollama_client, "show", side_effect=AssertionError("no architectural limit")
+    with patch.object(engine.ollama_client, "ps", return_value=response), patch(
+        "ollama.Client.show", side_effect=AssertionError("no architectural limit")
     ):
         assert engine.context_limit() == 8192
 
@@ -76,7 +80,7 @@ def test_cold_model_load_then_query():
 def test_explicit_context_and_response_are_sent_and_authoritative():
     engine = InferenceEngine(num_ctx=8192, num_predict=2048)
     with patch.object(engine.ollama_client, "ps") as ps, patch.object(
-        engine.ollama_client, "chat", return_value=iter([])
+        engine.ollama_client, "chat", return_value=iter([{"done": True, "message": {}}])
     ) as chat:
         assert engine.context_limit(load=True) == 8192
         list(engine.stream_chat([], options={"temperature": 0.2, "num_ctx": 1}))
@@ -119,43 +123,42 @@ def run_loop(engine, session, inputs):
 
 
 @pytest.mark.parametrize("oversized", ["instructions", "paste"])
-def test_oversize_never_blocks_inference(oversized, capsys):
+def test_oversize_still_sends_inference_request(oversized):
     session = Session("x" * 60000 if oversized == "instructions" else "rules")
     session.add_message("user", "earlier")
     session.add_message("assistant", "answer")
-    before = session.messages
     prompt = "hello" if oversized == "instructions" else "x\n" * 30000
     engine = InferenceEngine(model="old", num_ctx=8192)
     with patch.object(engine.ollama_client, "chat", return_value=iter([
-        {"message": {"content": "hello back"}},
+        {"done": True, "message": {"content": "hello back"}},
     ])) as chat:
         run_loop(engine, session, [prompt])
-        chat.assert_called_once()
-    assert session.messages == before + [
-        {"role": "user", "content": prompt}, {"role": "assistant", "content": "hello back"},
-    ]
-    assert not capsys.readouterr().err
+    chat.assert_called_once()
+    assert chat.call_args.kwargs["messages"][-1]["content"] == prompt
+    assert session.conversation[-1] == {"role": "assistant", "content": "hello back"}
 
 
 @pytest.mark.parametrize("failure", [KeyboardInterrupt(), httpx.ConnectError("lost")])
-def test_discovery_failure_does_not_block_response(failure):
+def test_context_discovery_failure_does_not_prevent_inference(failure):
     engine = InferenceEngine(model="old")
     session = Session("rules")
     with patch.object(engine.ollama_client, "ps", side_effect=failure), patch.object(
-        engine.ollama_client, "chat", return_value=iter([{"message": {"content": "hi"}}])
+        engine.ollama_client, "chat", return_value=iter([
+            {"done": True, "message": {"content": "hi"}},
+        ])
     ) as chat:
         run_loop(engine, session, ["hello"])
         chat.assert_called_once()
     assert session.turn_count == 1
 
 
-def test_unavailable_limit_is_silent_and_never_loads_or_blocks(capsys):
+def test_unavailable_limit_does_not_prevent_inference(capsys):
     engine = InferenceEngine(model="old")
     session = Session("rules")
     with patch.object(engine.ollama_client, "ps", return_value={"models": []}), patch.object(
         engine.ollama_client, "generate"
     ) as load, patch.object(engine.ollama_client, "chat", return_value=iter([
-        {"message": {"content": "hello"}},
+        {"done": True, "message": {"content": "hello"}},
     ])) as chat:
         run_loop(engine, session, ["hi", "/context"])
         chat.assert_called_once()
@@ -238,6 +241,33 @@ def test_runtime_allocation_is_not_cached():
     ]):
         assert engine.context_limit() == 8192
         assert engine.context_limit(load=True) == 4096
+
+
+def test_budget_boundary_includes_arguments_results_thinking_and_tools():
+    messages = [
+        {"role": "user", "content": "inspect"},
+        {"role": "assistant", "content": "", "thinking": "considering",
+         "tool_calls": [{"function": {"name": "run_command",
+                                     "arguments": {"command": "echo hi"}}}]},
+        {"role": "tool", "tool_name": "run_command", "content": "bounded result"},
+    ]
+    tools = [{"type": "function", "function": {"name": "run_command"}}]
+    counter = ConservativeTokenCounter()
+    count = counter.count(messages, tools)
+    assert count.tools > 0
+    assert count.total > counter.count([{"role": m["role"], "content": m["content"]}
+                                        for m in messages]).total
+
+
+def test_context_footer_warns_when_prompt_and_reply_exceed_limit():
+    count = PromptCount(7000, 0, 0)
+    status = ui.context_status(count, 4096, ContextBudget(2048))
+    assert "WARNING" in status
+    assert "4,952 tokens over context budget" in status
+
+    under_limit = ui.context_status(PromptCount(1000, 0, 0), 4096, ContextBudget(2048))
+    assert "WARNING" not in under_limit
+    assert ui.context_status(count, None, ContextBudget(2048)) == ""
 
 
 def test_context_unknown_limit_and_missing_reported_counts(capsys):

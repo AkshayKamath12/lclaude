@@ -6,7 +6,7 @@ import os
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from uuid import UUID
 
 from lclaude.session import Session
@@ -42,15 +42,16 @@ def _timestamp(value: object, field: str) -> datetime:
 
 
 def deserialize(data: Any, project: Path) -> tuple[Session, str]:
-    """Validate schema v1 before constructing any active conversation state."""
+    """Read v1/v2 chats and the current SDK-shaped v3 transcript."""
     _require(isinstance(data, dict), "session must be a JSON object")
     version = data.get("schema_version")
-    _require(type(version) is int and version == 1,
-             f"Unsupported schema_version: {version!r}; expected 1")
-    # Accept the earlier draft field when reading, but never restore or write it.
+    _require(type(version) is int and version in (1, 2, 3),
+             f"Unsupported schema_version: {version!r}; expected 1, 2 or 3")
     fields = {"schema_version", "session_id", "project", "created_at",
               "updated_at", "model", "messages"}
-    _require(set(data) - {"system_prompt"} == fields, "Invalid schema v1 fields")
+    if version == 2:
+        fields.add("artifacts")
+    _require(set(data) - {"system_prompt"} == fields, "Invalid schema fields")
     session_id = _session_id(data["session_id"])
     _require(data["project"] == {"path": str(project)}, "Session belongs to a different project")
     created = _timestamp(data["created_at"], "created_at")
@@ -59,26 +60,122 @@ def deserialize(data: Any, project: Path) -> tuple[Session, str]:
     model = data["model"]
     _require(isinstance(model, str) and bool(model.strip()), "model must be a nonempty string")
     messages = data["messages"]
-    _require(isinstance(messages, list) and len(messages) % 2 == 0,
-             "messages must contain complete user/assistant turns")
+    _require(isinstance(messages, list), "messages must be a list")
+    if version == 1:
+        _require(len(messages) % 2 == 0, "messages must contain complete user/assistant turns")
+    if version == 2:
+        _require(isinstance(data["artifacts"], list), "artifacts must be a list")
     session = Session()
     session.session_id = session_id
     session.created_at = data["created_at"]
     session.updated_at = data["updated_at"]
-    for index, message in enumerate(messages):
-        role: Literal["user", "assistant"] = "user" if index % 2 == 0 else "assistant"
-        _require(isinstance(message, dict) and set(message) == {"role", "content"},
-                 f"Invalid message at index {index}")
-        _require(message["role"] == role and isinstance(message["content"], str),
-                 f"Message {index} must have role {role!r} and string content")
-        session.add_message(role, message["content"])
+    pending: list[dict[str, Any]] = []
+    previous_role: str | None = None
+    for index, original in enumerate(messages):
+        _require(isinstance(original, dict), f"Invalid message at index {index}")
+        message = dict(original)
+        role = message.get("role")
+        _require(role in ("user", "assistant", "tool"), f"Invalid role at index {index}")
+        _require(isinstance(message.get("content"), str),
+                 f"Message {index} must have string content")
+        if version == 1:
+            expected = "user" if index % 2 == 0 else "assistant"
+            _require(role == expected and set(message) == {"role", "content"},
+                     f"Message {index} must have role {expected!r}")
+        if version == 2:
+            # Import historical receipts as text. Artifact files are left untouched,
+            # but are no longer read or written by the application.
+            if role == "assistant" and "tool_calls" in message:
+                calls = message["tool_calls"]
+                _require(isinstance(calls, list) and bool(calls), "Invalid tool_calls")
+                converted = []
+                for call in calls:
+                    _require(isinstance(call, dict)
+                             and set(call) == {"id", "name", "arguments"},
+                             "Invalid legacy assistant tool call")
+                    converted.append({"id": call["id"], "function": {
+                        "name": call["name"], "arguments": call["arguments"]}})
+                message["tool_calls"] = converted
+            if role == "tool":
+                _require({"role", "content", "tool_call_id", "name", "status"} <= set(message),
+                         "Invalid legacy tool result")
+                status = message.pop("status")
+                _require(status in ("success", "error", "incomplete", "interrupted"),
+                         "Invalid legacy result status")
+                message["tool_name"] = message.pop("name")
+                message.pop("artifact_id", None)
+                try:
+                    result = json.loads(message["content"])
+                except ValueError:
+                    result = {"detail": message["content"]}
+                if not isinstance(result, dict):
+                    result = {"detail": message["content"]}
+                result["status"] = "pending" if status in ("incomplete", "interrupted") else status
+                if result["status"] == "pending":
+                    result["detail"] = "Legacy interrupted call; execution outcome is unknown."
+                message["content"] = json.dumps(result, ensure_ascii=False)
+        if role == "user":
+            _require(not pending and previous_role in (None, "assistant", "tool")
+                     and set(message) == {"role", "content"}, "Invalid user role or fields")
+        elif role == "assistant":
+            _require(not pending and previous_role in ("user", "tool"),
+                     "Invalid assistant role or unresolved tool calls")
+            _require(set(message) <= {"role", "content", "thinking", "tool_calls"},
+                     "Invalid assistant fields")
+            if "thinking" in message:
+                _require(isinstance(message["thinking"], str), "thinking must be a string")
+            if "tool_calls" in message:
+                calls = message["tool_calls"]
+                _require(isinstance(calls, list) and bool(calls), "Invalid tool_calls")
+                ids: set[str] = set()
+                for call in calls:
+                    _require(isinstance(call, dict)
+                             and set(call) <= {"function", "id", "type"}, "Invalid tool call")
+                    function = call.get("function")
+                    _require(isinstance(function, dict)
+                             and set(function) <= {"name", "arguments", "index"}
+                             and isinstance(function.get("name"), str), "Invalid tool function")
+                    if "id" in call:
+                        call_id = call["id"]
+                        _require(isinstance(call_id, str) and bool(call_id)
+                                 and call_id not in ids, "Invalid or duplicate call ID")
+                        ids.add(call_id)
+                    try:
+                        json.dumps(call, allow_nan=False)
+                    except (TypeError, ValueError) as exc:
+                        raise SessionStorageError("Tool calls must be JSON values") from exc
+                pending = list(calls)
+        else:
+            _require({"role", "content", "tool_name"} <= set(message)
+                     <= {"role", "content", "tool_name", "tool_call_id"},
+                     "Invalid tool result fields")
+            _require(bool(pending), "Orphaned tool result")
+            call = pending.pop(0)
+            _require(message["tool_name"] == call["function"]["name"]
+                     and message.get("tool_call_id") == call.get("id"),
+                     "Tool results must match calls in their original order")
+            try:
+                result = json.loads(message["content"])
+            except ValueError as exc:
+                raise SessionStorageError("Invalid tool result JSON") from exc
+            _require(isinstance(result, dict) and result.get("status") in (
+                "not_started", "pending", "success", "error", "rejected",
+                "nonzero_exit", "timeout", "cancelled",
+            ), "Invalid result status")
+        session.add_message(
+            cast(Literal["user", "assistant", "tool"], role), message["content"],
+            **{k: v for k, v in message.items() if k not in ("role", "content")},
+        )
+        previous_role = role
+    _require(not pending and previous_role != "user",
+             "Session must contain complete responses or complete tool exchanges")
     return session, str(model)
 
 
 def serialize(session: Session, model: str, project: Path, updated_at: str) -> dict[str, Any]:
     """Serialize full history independently of inference context and presentation."""
     data = {
-        "schema_version": 1,
+        "schema_version": 3,
         "session_id": session.session_id,
         "project": {"path": str(project)},
         "created_at": session.created_at,

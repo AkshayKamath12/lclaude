@@ -1,10 +1,12 @@
 """Terminal presentation and I/O handling for lclaude."""
 
+import json
 import re
 import sys
 from collections.abc import Callable, Generator, Iterable, Mapping
 from contextlib import contextmanager
 from datetime import datetime
+from typing import Any
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.application import Application
@@ -30,6 +32,7 @@ from rich.markdown import Markdown
 
 from lclaude.context import ContextBudget, PromptCount
 from lclaude.engine import Usage
+from lclaude.tools import Command
 
 
 class StreamAbortedError(Exception):
@@ -438,7 +441,7 @@ class InputReader:
             return None
 
 
-def render_conversation(messages: Iterable[Mapping[str, str]], *, chat_id: str) -> None:
+def render_conversation(messages: Iterable[Mapping[str, Any]], *, chat_id: str) -> None:
     """Replay saved dialogue into terminal scrollback without running inference."""
     interactive = sys.stdout.isatty()
     console = Console(file=sys.stdout) if interactive else None
@@ -446,9 +449,25 @@ def render_conversation(messages: Iterable[Mapping[str, str]], *, chat_id: str) 
         console.rule(f"Resumed chat {chat_id}")
     else:
         sys.stdout.write(f"\nResumed chat {chat_id}\n\n")
+    calls: list[dict[str, Any]] = []
     try:
         for message in messages:
             role = message["role"]
+            if role == "assistant" and message.get("tool_calls"):
+                calls = list(message["tool_calls"])
+                if not message["content"]:
+                    continue
+            if role == "tool":
+                try:
+                    result = json.loads(message["content"])
+                except ValueError:
+                    result = {}
+                truncated = isinstance(result, dict) and bool(result.get("truncated"))
+                call = calls.pop(0) if calls else {}
+                print_tool_activity(message["tool_name"],
+                                    call.get("function", {}).get("arguments", {}),
+                                    result.get("status", "unknown"), truncated)
+                continue
             if role not in ("user", "assistant"):
                 continue
             label = "You" if role == "user" else "Assistant"
@@ -530,6 +549,63 @@ def print_aborted() -> None:
     sys.stdout.flush()
 
 
+def _safe_tool_text(value: Any) -> str:
+    """Make control characters visible so a command cannot hide its approval display."""
+    return "".join(
+        char if char.isprintable() else char.encode("unicode_escape").decode("ascii")
+        for char in str(value)
+    )
+
+
+def approve_command(command: Command) -> str:
+    """Show the complete request and require explicit interactive approval."""
+    shell = "PowerShell" if command.shell == "powershell" else command.shell
+    sys.stdout.write(
+        f"\n┌─ run_command · {shell} · {command.timeout_seconds}s\n"
+        f"│ {_safe_tool_text(command.cwd)}\n"
+        f"│ {_safe_tool_text(command.command)}\n"
+        "│ Runs with your permissions; not sandboxed.\n"
+        "└─ "
+    )
+    sys.stdout.flush()
+    if not sys.stdin.isatty():
+        sys.stdout.write("Command rejected: approval requires interactive input.\n")
+        return "rejected"
+    try:
+        return "approved" if input("Run? [y/N] ").strip().lower() in (
+            "y", "yes",
+        ) else "rejected"
+    except EOFError:
+        return "rejected"
+    except KeyboardInterrupt:
+        return "cancelled"
+
+
+def print_tool_activity(name: str, arguments: Any, status: str, truncated: bool = False) -> None:
+    details = arguments.get("command", "") if isinstance(arguments, dict) else "invalid arguments"
+    text = _safe_tool_text(details)
+    if len(text) > 120:
+        text = text[:117] + "..."
+    if status == "running":
+        line = f"  ▶ {text}"
+    else:
+        marker = "✓" if status == "success" else "✗"
+        line = f"  {marker} {_safe_tool_text(name)} · {status}"
+    if truncated:
+        line += " · output truncated"
+    sys.stdout.write(line + "\n")
+    sys.stdout.flush()
+
+
+def print_tool_resume() -> None:
+    """Explain how interrupted tool work is represented when resuming a chat."""
+    sys.stdout.write(
+        "\nThe previous turn stopped after tool work. Completed results are saved. "
+        "Pending commands have an unknown outcome; not_started commands were not executed. "
+        "No commands are repeated automatically.\n"
+    )
+
+
 def print_session_end() -> None:
     """Prints exit notification."""
     sys.stdout.write("\n\nSession terminated by user.\n")
@@ -549,14 +625,18 @@ def print_startup_error(message: str) -> None:
 
 
 def context_status(count: PromptCount, limit: int | None, budget: ContextBudget) -> str:
-    """No denominator or placeholder until a real allocation is known."""
+    """Show the current estimate and warn when it exceeds the context allocation."""
     if limit is None:
         return ""
     marker = "~" if count.estimated else ""
-    return (
+    status = (
         f"Prompt {marker}{count.total:,} / {limit:,} tokens | "
         f"{budget.response_tokens:,} reserved for reply"
     )
+    overflow = count.total + budget.response_tokens - limit
+    if overflow > 0:
+        status += f" | WARNING: ~{overflow:,} tokens over context budget"
+    return status
 
 
 @contextmanager
@@ -619,6 +699,8 @@ def print_context(
         f"  Instructions   {marker}{count.instructions:,}\n"
         f"  Conversation   {marker}{count.conversation:,}\n"
         f"  Formatting     {marker}{count.overhead:,}\n"
+        + (f"  Tools          {marker}{count.tools:,}\n" if count.tools else "")
+        +
         f"  Total          {marker}{count.total:,}{capacity}\n"
         f"  Reply limit    {budget.response_tokens:,}\n"
     )

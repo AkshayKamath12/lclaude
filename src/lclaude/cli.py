@@ -14,21 +14,23 @@ from lclaude.commands import (
     ShowContext,
     handle_slash_command,
 )
-from lclaude.context import ConservativeTokenCounter, ContextBudget
+from lclaude.context import ConservativeTokenCounter, ContextBudget, PromptCount
 from lclaude.engine import (
     InferenceEngine,
     ModelNotFoundError,
     OllamaConnectionError,
     OllamaEngineError,
+    Usage,
 )
 from lclaude.instructions import InstructionLoadError, load_system_prompt
 from lclaude.persistence import ChatStore, SessionStorageError
 from lclaude.session import Session
+from lclaude.tools import TOOL_SCHEMAS, ToolError, command_result, run_command, validate_command
 
 
 def run_chat_loop(
     engine: InferenceEngine, models: list[str], *, system_prompt: str | None = None,
-    session: Session | None = None, store: ChatStore
+    session: Session | None = None, store: ChatStore, max_tool_iterations: int = 10,
 ) -> None:
     """Executes the interactive Read-Eval-Print Loop (REPL)."""
     active_session = session if session is not None else Session(system_prompt=system_prompt)
@@ -48,9 +50,11 @@ def run_chat_loop(
     # Show the resumed conversation once when the chat loop starts.
     if not active_session.is_empty:
         ui.render_conversation(active_session.conversation, chat_id=active_session.session_id)
+        if active_session.needs_response:
+            ui.print_tool_resume()
     reader = ui.InputReader(commands=commands, models=models)
-
     counter = ConservativeTokenCounter()
+
     budget = ContextBudget(engine.num_predict)
     last_completed_usage = None
 
@@ -62,7 +66,8 @@ def run_chat_loop(
         except KeyboardInterrupt:
             ui.print_aborted()
             limit = None
-        reader.set_context(counter.count(active_session.messages), limit, budget)
+        count = counter.count(active_session.messages, TOOL_SCHEMAS)
+        reader.set_context(count, limit, budget)
         user_input = reader.read()
 
         if user_input is None:
@@ -119,12 +124,15 @@ def run_chat_loop(
                         ui.render_conversation(
                             active_session.conversation, chat_id=active_session.session_id
                         )
+                        if active_session.needs_response:
+                            ui.print_tool_resume()
                 except (SessionStorageError, OllamaEngineError) as exc:
                     ui.print_error("Chat selection failed", str(exc))
                 except KeyboardInterrupt:
                     sys.stdout.write("\nChat selection cancelled.\n")
             elif isinstance(action, ShowContext):
-                ui.print_context(counter.count(active_session.messages), limit, budget, detail=True)
+                count = counter.count(active_session.messages, TOOL_SCHEMAS)
+                ui.print_context(count, limit, budget, detail=True)
                 if last_completed_usage is not None:
                     ui.print_usage(*last_completed_usage)
             if active_session.is_empty:
@@ -132,24 +140,90 @@ def run_chat_loop(
             continue
 
         active_session.add_message("user", user_input)
-        count = counter.count(active_session.messages)
-        reader.set_context(count, limit, budget)
         try:
-            full_response = ui.render_stream(
-                engine.stream_chat(active_session.messages), context_text=reader.context_text
+            last_completed_usage = run_agent_turn(
+                engine, active_session, store, reader, limit, budget, max_tool_iterations,
             )
-            active_session.add_message("assistant", full_response)
-            save()
-            if engine.last_usage is not None:
-                last_completed_usage = (engine.last_usage, count)
-            else:
-                last_completed_usage = None
-        except ui.StreamAbortedError:
+        except (ui.StreamAbortedError, KeyboardInterrupt):
             active_session.rollback()
             ui.print_aborted()
         except (OllamaConnectionError, OllamaEngineError) as exc:
             active_session.rollback()
             ui.print_error("Connection Error", str(exc))
+        except SessionStorageError as exc:
+            active_session.rollback()
+            ui.print_error("Agent turn stopped", str(exc))
+
+
+def run_agent_turn(
+    engine: InferenceEngine, session: Session, store: ChatStore, reader: ui.InputReader,
+    limit: int | None, budget: ContextBudget, max_iterations: int,
+) -> tuple[Usage, PromptCount] | None:
+    """Run a user turn through model responses and any requested commands.
+
+    Each iteration sends the current conversation and tool schema to Ollama.
+    Responses with tool calls are saved. Each call is validated in order; valid
+    commands are shown for approval, and approved commands are checkpointed before
+    execution. Bounded results are saved before asking the model again. The loop
+    ends with a final response, cancellation, or the iteration limit. A final
+    response returns its usage and prompt estimate.
+    """
+    counter = ConservativeTokenCounter()
+    for _ in range(max_iterations):
+        messages = session.messages
+        count = counter.count(messages, TOOL_SCHEMAS)
+        reader.set_context(count, limit, budget)
+        stream = engine.stream_chat(messages, tools=TOOL_SCHEMAS)
+        try:
+            content = ui.render_stream(stream, context_text=reader.context_text)
+        finally:
+            stream.close()
+        calls = engine.last_tool_calls
+        if not calls:
+            session.add_message("assistant", content, thinking=engine.last_thinking or None)
+            try:
+                store.save(session, engine.model)
+            except SessionStorageError:
+                pass
+            return (engine.last_usage, count) if engine.last_usage is not None else None
+
+        # Append the assistant call and ordered not_started placeholders before execution.
+        # result_start indexes them in memory
+        result_start = session.begin_tools(content, calls, engine.last_thinking)
+        store.save(session, engine.model)
+        for index, call in enumerate(calls):
+            function = call["function"]
+            name, arguments = function["name"], function.get("arguments", {})
+            try:
+                command = validate_command(store.project, name, arguments)
+            except ToolError as exc:
+                result = command_result("error", str(exc))
+            else:
+                approval = ui.approve_command(command)
+                if approval != "approved":
+                    result = command_result(approval, "Command was not executed.")
+                else:
+                    session.set_tool_result(result_start + index, command_result(
+                        "pending", "Approved command may have started; outcome is unknown "
+                        "until a completed result is saved. Never automatically rerun it.",
+                        command=command.command, shell=command.shell, cwd=str(command.cwd),
+                        timeout_seconds=command.timeout_seconds,
+                    ))
+                    # If this save fails, the subprocess must never start.
+                    store.save(session, engine.model)
+                    ui.print_tool_activity(name, arguments, "running")
+                    result = run_command(command)
+            session.set_tool_result(result_start + index, result)
+            store.save(session, engine.model)
+            ui.print_tool_activity(
+                name, arguments, result["status"], result.get("truncated", False),
+            )
+            if result["status"] == "cancelled":
+                return None
+    ui.print_error("Tool loop limit", f"Stopped after {max_iterations} model responses. "
+                   "Command results are saved; enter a new message to continue.")
+    return None
+
 
 def parse_args() -> argparse.Namespace:
     """Parses flags, verifies local engine readiness, and launches the REPL."""
@@ -181,11 +255,15 @@ def parse_args() -> argparse.Namespace:
                         help="Explicit Ollama context allocation; otherwise discover runtime size")
     parser.add_argument("--max-response-tokens", type=int, default=2048,
                         help="Maximum reply tokens (default: 2048)")
+    parser.add_argument("--max-tool-iterations", type=int, default=10,
+                        help="Maximum tool loop iterations (default: 10)")
     args = parser.parse_args()
     if args.num_ctx is not None and args.num_ctx <= 0:
         parser.error("--num-ctx must be positive")
     if args.max_response_tokens <= 0:
         parser.error("Reply tokens must be positive")
+    if args.max_tool_iterations <= 0:
+        parser.error("Tool loop limit must be positive")
     return args
 
 
@@ -212,7 +290,7 @@ def main() -> None:
         host = args.host,
         timeout = args.timeout,
         num_ctx=args.num_ctx,
-        num_predict=args.max_response_tokens
+        num_predict=args.max_response_tokens,
     )
 
     try:
@@ -224,7 +302,8 @@ def main() -> None:
         sys.stderr.write(f"Unexpected startup failure: {exc}\n")
         sys.exit(1)
 
-    run_chat_loop(engine, models, session=session, store=store)
+    run_chat_loop(engine, models, session=session, store=store,
+                  max_tool_iterations=args.max_tool_iterations)
 
 if __name__ == "__main__":
     main()
