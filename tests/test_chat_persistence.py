@@ -301,9 +301,11 @@ def test_launch_instructions_apply_to_resumed_requests_and_clear(
         patch("signal.signal"),
     ):
         client.return_value.list.return_value = {"models": [{"model": "new"}]}
-        client.return_value.ps.return_value = {"models": []}
+        client.return_value.ps.return_value = {"models": [
+            {"model": "new", "context_length": 8192}
+        ]}
         client.return_value.chat.side_effect = [
-            iter([{"message": {"content": "response"}}]) for _ in range(3)
+            iter([{"done": True, "message": {"content": "response"}}]) for _ in range(3)
         ]
         main()
     requests = [call.kwargs["messages"] for call in client.return_value.chat.call_args_list]

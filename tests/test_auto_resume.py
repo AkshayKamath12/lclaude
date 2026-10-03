@@ -37,8 +37,12 @@ def test_launch_resumes_newest_project_chat_with_current_instructions(
         client.return_value.list.return_value = {
             "models": [{"model": "saved"}, {"model": "override"}]
         }
-        client.return_value.ps.return_value = {"models": []}
-        client.return_value.chat.return_value = iter([{"message": {"content": "next answer"}}])
+        client.return_value.ps.return_value = {"models": [
+            {"model": name, "context_length": 8192} for name in ("saved", "override")
+        ]}
+        client.return_value.chat.return_value = iter([
+            {"done": True, "message": {"content": "next answer"}},
+        ])
         main()
     request = client.return_value.chat.call_args.kwargs
     assert request["model"] == ("override" if override else "saved")
@@ -116,7 +120,9 @@ def test_resume_without_new_turn_does_not_write_or_generate(tmp_path, monkeypatc
         patch("signal.signal"),
     ):
         client.return_value.list.return_value = {"models": [{"model": "saved"}]}
-        client.return_value.ps.return_value = {"models": []}
+        client.return_value.ps.return_value = {"models": [
+            {"model": name, "context_length": 8192} for name in ("saved", "override")
+        ]}
         main()
     client.return_value.chat.assert_not_called()
     assert path.read_bytes() == before

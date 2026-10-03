@@ -1,9 +1,10 @@
 """Complete prompt accounting, independent of transport, state, and rendering."""
 
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from math import ceil
-from typing import Protocol
+from typing import Any, Protocol
 
 
 @dataclass(frozen=True)
@@ -12,16 +13,18 @@ class PromptCount:
     conversation: int
     overhead: int
     estimated: bool = True
+    tools: int = 0
 
     @property
     def total(self) -> int:
-        return self.instructions + self.conversation + self.overhead
+        return self.instructions + self.conversation + self.overhead + self.tools
 
 
 class TokenCounter(Protocol):
     """Adapters must count the full chat template, not just tokenize content."""
 
-    def count(self, messages: Sequence[Mapping[str, str]]) -> PromptCount: ...
+    def count(self, messages: Sequence[Mapping[str, Any]],
+              tools: Sequence[Mapping[str, Any]] = ()) -> PromptCount: ...
 
 
 class ConservativeTokenCounter:
@@ -33,15 +36,22 @@ class ConservativeTokenCounter:
     prompt_eval_count is reported as exact.
     """
 
-    def count(self, messages: Sequence[Mapping[str, str]]) -> PromptCount:
+    def count(self, messages: Sequence[Mapping[str, Any]],
+              tools: Sequence[Mapping[str, Any]] = ()) -> PromptCount:
         instructions = conversation = 0
         for message in messages:
-            size = ceil(len(message["content"].encode("utf-8")) / 3)
+            text = message["content"]
+            metadata = {k: v for k, v in message.items() if k not in ("role", "content")}
+            if metadata:
+                text += json.dumps(metadata, ensure_ascii=False, separators=(",", ":"))
+            size = ceil(len(text.encode("utf-8")) / 3)
             if message["role"] == "system":
                 instructions += size
             else:
                 conversation += size
-        return PromptCount(instructions, conversation, 16 * (len(messages) + 1))
+        tool_bytes = json.dumps(tools, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        tool_count = ceil(len(tool_bytes) / 3) if tools else 0
+        return PromptCount(instructions, conversation, 16 * (len(messages) + 1), tools=tool_count)
 
 
 @dataclass(frozen=True)
