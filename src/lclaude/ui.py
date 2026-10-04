@@ -3,8 +3,7 @@
 import json
 import re
 import sys
-from collections.abc import Callable, Generator, Iterable, Mapping
-from contextlib import contextmanager
+from collections.abc import Iterable, Mapping
 from datetime import datetime
 from typing import Any
 
@@ -27,12 +26,14 @@ from prompt_toolkit.output import Output
 from prompt_toolkit.styles import Style
 from prompt_toolkit.validation import Validator
 from rich.console import Console
-from rich.live import Live
 from rich.markdown import Markdown
 
 from lclaude.context import ContextBudget, PromptCount
 from lclaude.engine import Usage
+from lclaude.stream_display import StreamDisplay
 from lclaude.tools import Command
+
+_stream_display: StreamDisplay | None = None
 
 
 class StreamAbortedError(Exception):
@@ -488,6 +489,7 @@ def render_conversation(messages: Iterable[Mapping[str, Any]], *, chat_id: str) 
 
 def render_stream(token_stream: Iterable[str], *, context_text: str = "") -> str:
     """Streams response tokens and renders live Markdown concurrently."""
+    global _stream_display
     accumulated: list[str] = []
     
     # Fallback for piped/redirected output (headless mode)
@@ -503,43 +505,22 @@ def render_stream(token_stream: Iterable[str], *, context_text: str = "") -> str
         sys.stdout.write("\n")
         return "".join(accumulated)
 
-    # Interactive live terminal rendering
     console = Console(file=sys.stdout, force_terminal=True)
+    display = StreamDisplay(console, context_text)
+    previous_display = _stream_display
+    _stream_display = display
     try:
-        with pinned_footer(console, context_text) as refresh_footer:
-            return _render_terminal_stream(token_stream, console, refresh_footer)
+        display.start()
+        for token in token_stream:
+            accumulated.append(token)
+            display.update(token)
     except KeyboardInterrupt:
         raise StreamAbortedError() from None
-
-
-def _render_terminal_stream(
-    token_stream: Iterable[str], console: Console, refresh_footer: Callable[[], None],
-) -> str:
-    accumulated: list[str] = []
-    try:
-        with console.status("Thinking…"):
-            tokens = iter(token_stream)
-            for token in tokens:
-                refresh_footer()
-                if token:
-                    accumulated.append(token)
-                    break
-
-        # refresh_per_second=15 limits the repaint rate to prevent terminal flickering
-        with Live(
-            Markdown(f"**Assistant:**\n\n{''.join(accumulated)}"),
-            console=console, 
-            refresh_per_second=15,
-            vertical_overflow="visible"
-        ) as live:
-            for token in tokens:
-                refresh_footer()
-                accumulated.append(token)
-                # Live handles the terminal escape diffing automatically
-                live.update(Markdown(f"**Assistant:**\n\n{''.join(accumulated)}"))
-    except KeyboardInterrupt:
-        raise StreamAbortedError() from None
-        
+    finally:
+        try:
+            display.finish()
+        finally:
+            _stream_display = previous_display
     return "".join(accumulated)
 
 
@@ -559,6 +540,8 @@ def _safe_tool_text(value: Any) -> str:
 
 def approve_command(command: Command) -> str:
     """Show the complete request and require explicit interactive approval."""
+    if _stream_display is not None:
+        _stream_display.suspend()
     shell = "PowerShell" if command.shell == "powershell" else command.shell
     sys.stdout.write(
         f"\n┌─ run_command · {shell} · {command.timeout_seconds}s\n"
@@ -582,6 +565,8 @@ def approve_command(command: Command) -> str:
 
 
 def print_tool_activity(name: str, arguments: Any, status: str, truncated: bool = False) -> None:
+    if _stream_display is not None:
+        _stream_display.suspend()
     details = arguments.get("command", "") if isinstance(arguments, dict) else "invalid arguments"
     text = _safe_tool_text(details)
     if len(text) > 120:
@@ -638,48 +623,6 @@ def context_status(count: PromptCount, limit: int | None, budget: ContextBudget)
         status += f" | WARNING: ~{overflow:,} tokens over context budget"
     return status
 
-
-@contextmanager
-def pinned_footer(console: Console, text: str) -> Generator[Callable[[], None], None, None]:
-    """Reserve the terminal's bottom row while Rich renders above it.
-
-    PromptSession owns the bottom toolbar during input. During generation, a VT
-    scroll region keeps output above the same row, without taking over scrollback
-    or switching to an alternate screen. Always restore the region on exit.
-    """
-    if not text or console.legacy_windows:
-        yield lambda: None
-        return
-    dimensions: tuple[int, int] | None = None
-
-    def refresh() -> None:
-        nonlocal dimensions
-        width, height = console.size
-        if height < 3 or width < 2:
-            return
-        size = (width, height)
-        if size == dimensions:
-            return
-        dimensions = size
-        # Hold Rich's output lock so its animation cannot interleave control bytes.
-        with console:
-            # Make a blank row below the cursor, including when input ended on
-            # the last screen row. Keep Rich's cursor above the reserved footer.
-            console.file.write("\n\x1b[1A\r")
-            console.file.write(
-                f"\x1b7\x1b[1;{height - 1}r\x1b[{height};1H\x1b[2K"
-                f"\x1b[7m{text[:width - 1]}\x1b[0m\x1b8"
-            )
-            console.file.flush()
-
-    try:
-        refresh()
-        yield refresh
-    finally:
-        if dimensions is not None:
-            with console:
-                console.file.write("\x1b7\x1b[r" + f"\x1b[{dimensions[1]};1H\x1b[2K\x1b8")
-                console.file.flush()
 
 
 def print_context(
